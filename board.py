@@ -1,11 +1,15 @@
-from typing import Callable, Literal, Iterable, Self
+import json
+from collections.abc import Callable, Iterable
+from typing import Literal, Self, Tuple
+
 from portion import Interval, iterate, closed
-from list import List, IntList, FieldValueList, FieldValue
 
-type Procedure = Callable[[GameLine], tuple[GameLine, Procedure | None]]  # A procedure callable
+from list import List, IntList, FieldValue
 
-
-SIZECOMPARATOR: Callable[[List[any]], int] = lambda l: l.size()
+type ProcReturn = tuple[GameLine, set[int]]
+type ProcInput = [GameLine]
+type Solverithm = Callable[ProcInput, GameLine]
+type Procedure = Callable[ProcInput, ProcReturn]  # A procedure callable
 
 
 class Field:
@@ -14,27 +18,68 @@ class Field:
     EMPTY: FieldValue = 0
     EXCLUDE: FieldValue = -1
 
+    @staticmethod
+    def values():
+        return {Field.COLOR, Field.EMPTY, Field.EXCLUDE}
 
-class Line(FieldValueList):
+
+class Line(List[Literal[-1, 0, 1]]):
     def __init__(self, __iterable: Iterable[FieldValue]):
         super().__init__(__iterable)
 
-    def validate(func):
+    def __and__(self, other: Self):
+        if isinstance(other, type(self)) and self.size() == other.size():
+            return Line([self[i] or other[i] for i in range(self.size())])
+
+    def get_index_if_value_is(self, index: int, value: FieldValue):
+        return index if self[index] == value else None
+
+    @staticmethod
+    def indexes(func):
+        """Indicates that the returned value are indexes (0 <= x < size)"""
+        return func
+
+    @staticmethod
+    def values(func):
+        """Indicates that the returned values are the field values (-1 <= x <= 1)"""
+        return func
+
+    @staticmethod
+    def validate(func: Callable):
         def isvalid(self: Self, index: int):
-            if type(index) != int: print("HOOOOW")
-            if not (0 <= index < self.size()): return
+            if not isinstance(index, int):
+                print("HOOOOW")
+            if not (0 <= index < self.size()):
+                print("Out Of Bounds", f" {self}; {index}")
+                return
             func(self, index)
 
         return isvalid
 
+    def set_in_bound(self, index: int, value: FieldValue):
+        if self.in_bound(index):
+            self.set_field(index, value)
+
+    def in_bound_lower(self, index: int):
+        return 0 <= index
+
+    def in_bound_upper(self, index: int):
+        return index < self.size()
+
+    def in_bound(self, index: int):
+        return 0 <= index < self.size()
+
     def get(self, index: int):
         return self[index]
 
-    def setField(self, index: int, value: FieldValue):
+    def set_field(self, index: int, value: FieldValue):
         self[index] = value
 
+    def values_from_indexes(self, indexes: IntList) -> Self:
+        return Line([self[i] for i in indexes])
+
     @validate
-    def color(self, index: int):
+    def fill(self, index: int):
         """
         Colors the field (set its value to 1)
         """
@@ -45,38 +90,41 @@ class Line(FieldValueList):
 
     @validate
     def exclude(self, index: int):
-        '''
+        """
         Excludes the field (set its value to -1)
-        '''
+        """
         if self[index] != Field.COLOR:
             self[index] = Field.EXCLUDE
         else:
             print("Trying to exclude a colored field")
 
-    def getIndexesOfFieldValueMultiple(self, fields: set[FieldValue]) -> IntList:
+    @indexes
+    def indexes_of_fields(self, fields: set[FieldValue]) -> IntList:
         """
         Gets the indexes of the given field values in the line. [-1,-1,0,1] + (0,1) -> [2,3]
         """
         return IntList(range(self.size())).filter(lambda index: self[index] in fields)
 
-    def getIndexesOfFieldValue(self, field: FieldValue) -> IntList:
+    @indexes
+    def indexes_of_field(self, field: FieldValue) -> IntList:
         """
         Gets the indexes of a single field value in the line. [-1,-1,0,1] + 0 -> [2]
         """
-        return self.getIndexesOfFieldValueMultiple({field})
+        return self.indexes_of_fields({field})
 
-    def groupConnectedFieldMultiple(self, fields: set[FieldValue]):
+    @indexes
+    def group_adjacent_fields(self, fields: set[FieldValue]):
         """
-        Groups multiple field values if they are connected. [0,0,-1,1,0,0] + (0,1) -> [[0,1], [3,4,5]]
+        Groups multiple field indexes if they are connected. [0,0,-1,1,0,0] + (0,1) -> [[0,1], [3,4,5]]
         """
         list_: List[IntList] = List()
-        fieldIndexes = self.getIndexesOfFieldValueMultiple(fields)
-        collector = List()
-        for i, v in enumerate(fieldIndexes):
+        field_indexes = self.indexes_of_fields(fields)
+        collector = IntList()
+        for i, v in enumerate(field_indexes):
             if collector.size() == 0:
                 collector.append(v)
                 continue
-            if fieldIndexes[i - 1] == v - 1:
+            if field_indexes[i - 1] == v - 1:
                 collector.append(v)
                 continue
             list_.append(collector)
@@ -85,443 +133,442 @@ class Line(FieldValueList):
         list_.append(collector)
         return list_
 
-    def groupConnectedField(self, field: FieldValue) -> List[IntList]:
+    @indexes
+    def group_adjacent_field(self, field: FieldValue) -> List[IntList]:
         """
         Groups the field values if they are connected. [0,0,-1,1,0,0] + 0 -> [[0,1], [4,5]]
         """
-        return self.groupConnectedFieldMultiple({field})
+        return self.group_adjacent_fields({field})
 
-    def getStartedGroups(self):
+    @indexes
+    def slice_by(self, field: FieldValue):
+        return self.group_adjacent_fields(Field.values() - {field})
+
+    @indexes
+    def slice_by_x(self):
         """ O-OX--O -> [0,1,2], [4,5,6]"""
-        return self.groupConnectedFieldMultiple({Field.COLOR, Field.EMPTY})
+        return self.slice_by(Field.EXCLUDE)
 
-    def getFinishedGroups(self):
-        """Groups multiple field only if all of them is colored\n
-        O-O-X-OO -> []\n
-        O-XOO -> [[3,4]]
-        """
-        return self.getStartedGroups().filter(lambda group: group.matchAll(lambda f: f == Field.COLOR))
+    @indexes
+    def slice_by_x_contains_o(self):
+        return self.slice_by_x().filter(lambda group: Field.COLOR in self.values_from_indexes(group))
 
-    def getStartedWithColor(self):
-        return self.getStartedGroups().filter(lambda group: group.contains(Field.COLOR))
+    @indexes
+    def slice_by_x_contains_o_not_all_o(self):
+        return self.slice_by_x_contains_o().filter(lambda group: not self.values_from_indexes(group).match_all(lambda fv: fv == Field.COLOR))
 
-    def getStartedWithColorButNotFinished(self):
-        return self.getStartedWithColor().filter(lambda group: not group.matchAll(lambda f: f == Field.COLOR))
+    @indexes
+    def slice_by_x_all_empty(self):
+        return self.slice_by_x().filter(lambda group: Field.COLOR not in self.values_from_indexes(group))
 
-    def getEmptyStartedGroups(self):
-        return self.getStartedGroups().filter(lambda group: not group.contains(Field.COLOR))
+    @indexes
+    def first_color_index_after_only_x(self):
+        return self.get_index_if_value_is(self.slice_by_x()[0][0], Field.COLOR)
 
-    def getFirstColoredIndexIfNotEmptyBefore(self):
-        return self.getStartedGroups()[0][0] if self.get(self.getStartedGroups()[0][0]) == Field.COLOR else None
-
-    def getLastColoredIndexIfNotEmptyAfterFromBackwards(self):
-        sg = self.getStartedGroups()
-        return self.size() - 1 - sg[-1][-1] if self.get(sg[-1][-1]) == Field.COLOR else None
+    @indexes
+    def last_o_index_before_only_x(self):
+        return self.get_index_if_value_is(self.slice_by_x()[-1][-1], Field.COLOR)
 
 
-class OffsetLine(Line):
-    """
-    Mergable line with an offset
-    """
-
-    def __init__(self, __iterable: Iterable[FieldValue], offset=0):
-        super().__init__(__iterable)
-        self.offset = offset
-
-    def merge(self, line: Line) -> Line:
-        """
-        Merges this line to another line by its offset. Returns a new line instance. [-1,-1] + offset = 3 + [1,1,-1,0,0] -> [1, 1,-1,-1,-1]
-        """
-        newL = Line(line)
-        for i in range(self.size()):
-            newL[i + self.offset] = self[i]
-        return newL
-
+class ProcedureLib:
+    PROCEDURES: dict[str, Procedure] = dict()
+    @staticmethod
+    def get_names() -> set[str]:
+        return set(ProcedureLib.PROCEDURES.keys())
 
 class GameLine(tuple[Line, IntList]):
     """
     Line with tasks. Solvable
     """
 
-    def __init__(self, gameLine: tuple[Line, IntList]):
-        self.line, self.task = gameLine
-        self.task = IntList(self.task)
+    def __init__(self, line: Line, task: IntList):
+        self.line, self.task = line, IntList(task)
 
-    def task_reducable(func: Procedure):
+    def __new__(cls, line: Line, task: IntList):
+        instance = super().__new__(cls, (line, task))
+        return instance
 
-        def reduceTask(gLine: Self):
+    def __repr__(self):
+        return f'l:{self.line}, t:{self.task}'
 
-            originalTask = IntList(gLine.task)
+    def clone(self):
+        return self.__class__(Line(self.line), IntList(self.task))
 
-            started = gLine.line.getStartedGroups()
-            doneGroups = started.filter(lambda g: g.matchAll(lambda i: gLine.line[i] == Field.COLOR))
-            for g in doneGroups:
-                if g.size() in gLine.task:
-                    gLine.task.remove(g.size())
+    @staticmethod
+    def procedure(name: str):
+        def decorator(procedure: Solverithm):
+            def wrapper(game_line) -> ProcReturn:
+                before = Line(game_line.line)
+                after: GameLine = procedure(game_line)
+                diffs = before.get_diff_indexes(after.line)
+                print(f"Procedure '{name}' executed. Diffs: {diffs}")
+                return after, diffs
 
-            ret = func(gLine)
+            ProcedureLib.PROCEDURES[name] = wrapper
+            return wrapper
 
-            gLine.task = originalTask
+        return decorator
 
-            return ret
 
-        return reduceTask
+    def get_too_small_groups(self):
+        return self.line.slice_by_x_all_empty().filter(lambda group: self.task.match_all(lambda task: task > group.size()))
 
-    # # TODO: !!!!!!!!!!!! HA AZ ELSŐ getStarted()[0] ban == 1 akkor ugyanaz mintha az elején lenne a színes. Ez igaz
-    #  hátrafele is
+    def is_solved(self):
+        return self.task == self.line.group_adjacent_field(Field.COLOR).map(lambda gr, i: gr.size())
 
+    @procedure(name = "exclude if solved")
     def procIfDone(self):
-        print(162)
-        colors = self.line.count(Field.COLOR)
-        colorIndex = self.line.getStartedGroups()
-        if colors == self.task.addUp():
-            for i in colorIndex.plainer():
+        if self.is_solved():
+            for ind in self.line.indexes_of_field(Field.EMPTY):
+                self.line.exclude(ind)
+        return self
+
+    @procedure("if empty group = task amount && group size = task -> color all")
+    def procZero(self):
+        groups = self.line.slice_by_x()
+        if groups.size() == self.task.size() and groups.matchAllWithIndex(
+                lambda index, group, _: group.size() == self.task[index]):
+            indexes = groups.flat()
+            for i in range(self.line.size()):
+                if i in indexes:
+                    self.line[i] = Field.COLOR
+        return self
+
+    @procedure("remove too small groups")
+    def removeTooSmall(self):
+        for small_g in self.get_too_small_groups():
+            for i in small_g:
                 self.line.exclude(i)
-        return self, None
+        return self
 
-    def procZero(self):  # DOCED
-        print("169")
-        coloredGroups = self.line.groupConnectedField(Field.COLOR)
-        toCheck = (coloredGroups, self.line.getStartedGroups(), self.line.getStartedWithColor())
-        for groups in toCheck:
-            if groups.size() == self.task.size() and groups.matchAllWithIndex(
-                    lambda index, intlist, _: intlist.size() == self.task[index]):
-                indexes = groups.plainer()
-                for i in range(self.line.size()):
-                    self.line[i] = (Field.COLOR if indexes.contains(i) else Field.EXCLUDE)
-                return self, None
-        return self, None
+    @procedure("default starting interval solve")
+    def procedureOne(self):
 
-    def procedureOne(self):  #   DOCED
-        """
-        Procedure one. Main starting procedure
-        """
-        print("Proc 1:177")
+        taskSize = self.task.size()
+        slicedbyx = self.line.slice_by_x()
+        original: Line | None = None
+        if slicedbyx.size() == 1:
+            original = Line(self.line)
+            self.line = Line([self.line[i] for i in slicedbyx[0]])
 
-        if self.task.size() != 0:
+        iterator = 0
+        taskMap = {i: {"start": 0, "end": 0} for i in range(
+            taskSize)}  # Minden taskhoz egy kezdő és végződő index kell majd, egyenlőre 0
+        intervalMap: dict[int, Interval] = {}  # Minden taskhoz intervallum
+        for index, task in enumerate(self.task):  # Bejelöli a végeket
+            taskMap[index]["end"] = iterator + task - 1
+            iterator += task + 1
+        iterator = self.line.last_o_index_before_only_x() or self.line.size() - 1
+        for index, task in enumerate(self.task):  # Bejelöli a kezdőket
+            taskMap[taskSize - index - 1]["start"] = iterator - self.task[-index - 1] + 1
+            iterator -= self.task[-index - 1] + 1
+        for index, v in taskMap.items():  # Végigmeg a taskMapen és intervallumba foglalja őket
+            if v["start"] > self.line.size() - 1 or v["end"] > self.line.size() - 1: continue
+            intervalMap[index] = closed(v["start"], v["end"])
 
-            coloredGroups = self.line.getFinishedGroups()  # Színes mezők indexje
-            connectedFieldArray: List[IntList] = self.line.groupConnectedField(Field.EMPTY)  # Üres merzők group
-            emptyGroups = self.line.getEmptyStartedGroups()
-            allConnected = emptyGroups.size() == 1 and emptyGroups.plainer().size() == connectedFieldArray.size()  # Ha összes össze van e kötve és az első eleme
-            allBlock = emptyGroups[0] if allConnected else None
-            workLine = OffsetLine(self.line, 0)  # Ezen a lineon operálunk
-            workTasks = IntList(self.task)  # Ezeken a taskokon operálunk
-            if allConnected:
-                for i in coloredGroups:
-                    if i.size() == 0: continue
-                    workTasks.remove(i.size())
-                workLine = OffsetLine([Field.EMPTY for _ in range(allBlock.size())],
-                                      allBlock[0])  # Kivágja a -1 részeket
+        for p in intervalMap.values():  # Végigmegy az intervallumokon és kiszínezi a mezőket
+            for field in iterate(p, 1):
+                self.line.fill(field)
 
-            taskSize = workTasks.size()  # Hány task van
-            iterator = 0  # Iterator
-            taskMap: dict[int, dict[Literal["start", "end"], int]] = {i: {"start": 0, "end": 0} for i in range(
-                taskSize)}  # Minden taskhoz egy kezdő és végződő index kell majd, egyenlőre 0
-            intervalMap: dict[int, Interval] = {}  # Minden taskhoz intervallum
-            for i, t in enumerate(workTasks):  # Bejelöli a végeket
-                taskMap[i]["end"] = iterator + t - 1
-                iterator += t + 1
-            iterator = workLine.size() - 1
-            for i, t in enumerate(workTasks):  # Bejelöli a kezdőket
-                taskMap[taskSize - i - 1]["start"] = iterator - workTasks[-i - 1] + 1
-                iterator -= workTasks[-i - 1] + 1
-            for i, v in taskMap.items():  # Végigmeg a taskMapen és intervallumba foglalja őket
-                if v["start"] > workLine.size() - 1 or v["end"] > workLine.size() - 1: continue
-                intervalMap[i] = closed(v["start"], v["end"])
+        if original:
+            replace_start = slicedbyx[0][0] # First index that got modified in case of trimming
+            for i in range(self.line.size()):
+                original[replace_start + i] = self.line[i]
+            self.line = original
+        return self
 
-            for p in intervalMap.values():  # Végigmegy az intervallumokon és kiszínezi a mezőket
-                for field in iterate(p, 1):
-                    workLine.color(field)
-            self.line = workLine.merge(self.line)  # Mergeli a két line-t
-        return self, None
-
-    def procOneDotZero(self):  # DOCED
-        print("procOneDotZero:214")
-
-        def repeatFromStart():
-            """
-            Ha kisebb az első üres hely mint az első task -> Kizárja\n
-            Ismétlődik amíg lehet
-            """
-            before = Line(self.line)
-            emptyIndexes = self.line.getStartedGroups()
-            if emptyIndexes.size() > 0 and 0 < emptyIndexes[0].size() < self.task[0]: [
-                self.line.exclude(i) for i in emptyIndexes[
-                    0]]  # Ha az első task nagyobb mint az első üres hely Végigmegy a kisebb üres helyek indexein és kizárja
-            after = self.line
-            if after == before:
-                return True
-            return False
-
-        def repeatFromEnd():
-            '''
-            Ha kisebb az utolsó üres hely mint az utolsó task -> Kizárja\n
-            Ismétlődik amíg lehet
-            '''
-            before = Line(self.line)
-            emptyIndexes = self.line.getStartedGroups()
-            if emptyIndexes.size() > 0 and 0 < emptyIndexes[-1].size() < self.task[-1]: [
-                self.line.exclude(i) for i in emptyIndexes[
-                    -1]]  # Ha az első task nagyobb mint az első üres hely  Végigmegy a kisebb üres helyek indexein és kizárja
-            after = self.line
-            if after == before:
-                return True
-            return False
-
-        while not repeatFromStart(): break  # Ismétli
-        while not repeatFromEnd(): break
-
-        startedGs = self.line.getStartedGroups()
-
-        smallerThanAnyTaskGs = startedGs.filter(lambda g: self.task.matchAll(lambda t: g.size() < t))
-        for i in smallerThanAnyTaskGs:
-            i.forEach(lambda v: self.line.exclude(v))
-
-        return self, None
-
-    def procIfSide(self):  # DOCED
-        print("ifside:253")
+    @procedure("if color on side -> its always the start")
+    def procIfSide(self):
         i, j = 0, 0
-        firstCIndex = self.line.getFirstColoredIndexIfNotEmptyBefore()
+        firstCIndex = self.line.first_color_index_after_only_x()
         if firstCIndex is not None:
             for i in range(firstCIndex, firstCIndex + self.task[0]):
-                self.line.color(i)
-            self.line.exclude(i + 1)
-        lastCIndex = self.line.getLastColoredIndexIfNotEmptyAfterFromBackwards()
+                self.line.fill(i)
+            self.line.set_in_bound(i + 1, Field.EXCLUDE)
+
+        lastCIndex = self.line.last_o_index_before_only_x()
         if lastCIndex is not None:
-            for j in range(lastCIndex + 1, lastCIndex + self.task[-1]):
-                self.line.color(-j)
-            self.line.exclude(-j - 1)
+            for j in range(lastCIndex - self.task[-1] + 1, lastCIndex):
+                self.line.fill(j)
+            self.line.set_in_bound(lastCIndex - self.task[-1], Field.EXCLUDE)
 
-        return self, None
+        return self
 
-    @task_reducable
-    def procIfSameGAsTaskAndTCor(self):  # DOCED
-        print(f'procIfSameGAsTaskAndTCor:269')
-        started = self.line.getStartedWithColorButNotFinished()
-        if started.size() == self.task.size():
-            for i in range(self.task.size()):
-                if started[i].countCondition(lambda f: f == Field.COLOR) == self.task[i]:
-                    for f in range(started[i][0], started[i][-1] + 1):
-                        if self.line[f] != Field.COLOR:
-                            self.line.exclude(f)
+    @procedure("if near start or end then continue the sequence")
+    def continuestartorend(self):
+        if Field.COLOR not in self.line:
+            return self
+        slicex = self.line.slice_by_x()
+        original: Line | None = None
+        if slicex.size() == 1:
+            slice_line = slicex[0]
+            original = Line(self.line)
+            self.line = Line([self.line[i] for i in slice_line])
 
-    def procIfImpossibleG(self):  # DOCED
-        print("procIfImpossibleG:279")
-        if self.task.size() < self.line.getStartedGroups().size():  # Ha kevesebb task mint group
-            notEmptyGroups = self.line.getStartedWithColor()  # Groupok amiben van színes
-            onlyEmptyGroups = self.line.getEmptyStartedGroups()  # Groupok amiben nincs színes
-            if notEmptyGroups.size() == self.task.size():
-                [[self.line.exclude(i) for i in group] for group in
-                 onlyEmptyGroups]  # Ha annyi színes group mint task, a többi group biztos nem jó
+        first_task, last_task = self.task.edges()
+        first_color, last_color = self.line.indexes_of_field(Field.COLOR).edges()
+        if first_task - 1 > first_color:
+            first_continue_range = range(first_color + 1, first_task)
+            for i in first_continue_range:
+                self.line.fill(i)
+            if len(first_continue_range) == first_task - 1:
+                self.line.set_in_bound(first_task, Field.EXCLUDE)
+        if self.line.size() - last_task < last_color:
+            last_continue_range = range(self.line.size() - last_task, last_color)
+            for j in last_continue_range:
+                self.line.fill(j)
+            if len(last_continue_range) == last_task - 1:
+                self.line.set_in_bound(self.line.size() - last_task - 1, Field.EXCLUDE)
 
-        return self, None
+        if original:
+            for i, og_index in enumerate(slice_line):
+                original[og_index] = self.line[i]
+            self.line = original
 
+        return self
+
+    @procedure("if biggest task can be only in one group -> run default start proc")
     def procIfOneIfBiggerThanAny(self):
-        print("ifbiggerThanAny:288")
-        started = self.line.getStartedGroups()
-        biggestTask = self.task.max()
+        started = self.line.slice_by_x()
+
+        biggestTask = max(self.task)
         bigGs = started.filter(lambda g: g.size() >= biggestTask)
         if bigGs.size() == 1:
             biggestG = bigGs[0]
 
             subLine = Line([self.line[i] for i in biggestG])
-            subGameLine = GameLine((subLine, IntList.of(biggestTask)))
-            subGameLine, _ = subGameLine.procedureOne()
+            subGameLine = GameLine(subLine, IntList.of(biggestTask))
+            subGameLine.procedureOne()
 
-            [self.line.setField(biggestG[i], v) for i, v in enumerate(subGameLine.line)]
+            [self.line.set_field(biggestG[i], v) for i, v in enumerate(subGameLine.line)]
 
-        return self, None
+        return self
 
+    @procedure("if first or last group contains color and is the size of the first task -> color")
     def procIfCertainG(self):
-        print("procIfCertainG:305")
-        startedGroups = self.line.getStartedGroups()
-        notFinishedGroups = startedGroups.filter(
-            lambda g: g.matchAny(lambda i: self.line[i] == Field.COLOR) and not g.matchAll(
-                lambda i: self.line[i] == Field.COLOR))  # Nem teljesen színes groupok
-        if notFinishedGroups.size() != 0 and notFinishedGroups[0].size() != 0:
-            if self.task[0] == notFinishedGroups[0].size():  # Ha jó akkor színez
-                [self.line.color(i) for i in notFinishedGroups[0]]
+        groups = self.line.slice_by_x()
+        if Field.COLOR in self.line.values_from_indexes(groups[0]) and groups[0].size() == self.task[0]:
+            for i in groups[0]:
+                self.line.fill(i)
+        if Field.COLOR in self.line.values_from_indexes(groups[-1]) and groups[-1].size() == self.task[-1]:
+            for i in groups[-1]:
+                self.line.fill(i)
 
-        return self, None
+        return self
 
-    procOneFour: Procedure = procIfCertainG
+    @procedure("if task == started group -> color certain, exclude impossible")
+    def procgroupeqtask(self):
+        started_groups = self.line.slice_by_x_contains_o()
+        if started_groups.size() == self.task.size():
+            # Exclude every group that is not started
+            [self.line.exclude(field) for field in range(self.line.size()) if field not in started_groups.flat()]
 
-    def procedureTwo(self):  #   KIZÁR
-        """
-            KIZÁR
-            ha egy task van kizárja a biztos nemeket
-        """
-        print("Proc 2")
+            for group, task in zip(started_groups, self.task):
+                print(group, task)
+                if group.size() == task:
+                    for field in group:
+                        self.line.fill(field)
+                elif self.line.values_from_indexes(group).count(Field.COLOR) == task:
+                    [self.line.exclude(field) for field in group if self.line != Field.COLOR]
+                else:
+                    line = Line([self.line[i] for i in group])
+                    small_line = GameLine(line, IntList([task]))
+                    small_line.procedureOne()
+                    for i, v in zip(group, small_line.line):
+                        self.line[i] = v
+        return self
 
-        originalTask = IntList(self.task)
-        colorGroup = self.line.groupConnectedField(Field.COLOR)
-        if not colorGroup[0].isEmpty():
-            colorSorroundedByEx = colorGroup.filterWithIndex(
-                lambda i, g, a: (g[0] == 0 and (a[g[-1] + 1] if g[-1] + 1 < a.size() else 10) == Field.EXCLUDE) or (
-                        g[-1] == a.size() - 1 and (a[g[0] - 1] if g[0] - 1 >= 0 else 10) == Field.EXCLUDE) or (
-                                        (a[g[-1] + 1] if g[-1] + 1 < a.size() else 10) == Field.EXCLUDE and (
-                                    a[g[0] - 1] if g[0] - 1 >= 0 else 10) == Field.EXCLUDE))
+    @procedure("if an adjacent colored list is same size as biggest task -> surround with x")
+    def surroundIfBiggest(self):
+        colorGroups = self.line.group_adjacent_field(Field.COLOR)
+        biggest_task = max(self.task)
+        for group in colorGroups:
+            if group.size() == biggest_task:
+                for edge in (group[0] - 1, group[-1] + 1): #    Two surrounding fields
+                    if self.line.size() > edge >= 0 == self.line[edge]:
+                        self.line.exclude(edge)
 
-            originalTask = IntList(self.task)
-            for g in colorSorroundedByEx:
-                if len(g) in self.task:
-                    self.task.remove(len(g))
+        return self
 
-        if self.task.size() != 1:
-            self.task = originalTask
-            return self, None  # Csak ha egy task van
-        task = self.task[0]  # Egyetlen task szám
-        coloredIndexes = self.line.getIndexesOfFieldValue(Field.COLOR)  # Színes mezők indexje
-        if coloredIndexes.size() == task:  # Ha annyi színes amennyi kell -> minden más nem jo
-            for i in range(self.line.size()):
-                if not coloredIndexes.contains(i): self.line.exclude(i)
 
-        if coloredIndexes.size() == 0:
-            self.task = originalTask
-            return self, None
-        highestColored = coloredIndexes[-1]  # Legnagyobb index ahol színes
-        lowestColored = coloredIndexes[0]  # Legkisebb index ahol színes
-        if highestColored - lowestColored > 1:  # Ha nem egymás mellett van a két színezett
-            if highestColored - lowestColored + 1 > task: raise Exception("Two colors cant be connected: Procedure 2")
-            for i in range(lowestColored, highestColored):
-                self.line.color(i)  # Összeköti a két színeset
-        if highestColored + 1 > task:
-            [self.line.exclude(i) for i in range(highestColored - task + 1)]  # Ha nem éri el a szélét a legnagyobb
-            # indextol, tehát van mit kizárni # Kizárja a kizárandó mezőket
-        if self.line.size() - 1 - lowestColored >= task: [self.line.exclude(i) for i in
-                                                          range(self.line.size() - 1 - lowestColored + task - 1,
-                                                                self.line.size())]  # Ha nem éri el a legkisebb
-        # indextol a nagyobb szélét, tehát van mit kizárni # Kizárja a (lehetséges után + 1) tól a végéig(size())
+    @procedure("if one task and at least one colored field -> exclude unreachable")
+    def excludeunreachable(self):
+        if self.task.size() != 1 or Field.COLOR not in self.line:
+            return self
+        task = self.task[0] # only task
 
-        self.task = originalTask
-        return self, None
+        colored_fields = self.line.indexes_of_field(Field.COLOR)
+        first_colored, last_colored = colored_fields[0], colored_fields[-1]
+        for i in range(first_colored + 1, last_colored): # connect fields
+            self.line.fill(i)
+
+        excluded_from_start = range(0, max(last_colored - task + 1, 0))
+        excluded_from_end = range(min(first_colored + task, self.line.size()), self.line.size())
+        excluded = set().union(excluded_from_end, excluded_from_start)
+
+        for exc_iter in excluded:
+            self.line.exclude(exc_iter)
+
+        return self
+
+    #   TODO:   HA ELSO VAGY UTOLSO LEGNAGYOBB TASK ÉS VAN OLYAN COLOR BLOCK AMI AZ ÖSSZESNÉL NAGYOBB -> excludeunreachable
+    #   TODO:   HA A TOOSMALLTASK EGY NAGYOBB BLOCK ELŐTT
 
 
 class Board(List[Line]):
-    '''Játéktábla'''
+    """Játéktábla"""
 
-    def __init__(self, width=10, height=10):
+    def __init__(self, width=10, height=10, **kwargs):
         super().__init__()
-        self.height = height
-        self.width = width
-        self.rowTask: List[IntList] = [[1, 3], [1, 4], [1, 3, 2], [3, 3, 2], [3, 1], [5], [3], [1, 3], [2, 3],
-                                       [6]]  # HARD CODED
-        self.colTask: List[IntList] = [[4, 2], [1, 3], [3, 1], [1, 6], [8], [2, 5], [1, 1, 1], [2], [5],
-                                       [4]]  # HARD CODED
-        [self.append([0 if j == 3 else 0 for j in range(width)]) for i in range(height)]
+        self.height = kwargs.get("height") or height
+        self.width = kwargs.get("width") or width
+        self.rowTask: List[IntList] = kwargs.get("rowTask")
+        self.colTask: List[IntList] = kwargs.get("colTask")
+        [self.append([0 for _ in range(width)]) for _ in range(height)]
+
+    def get(self, x: int, y: int):
+        return self[x][y]
+
+    def __getitem__(self, index: int | tuple[Ellipsis, int]):
+        if isinstance(index, int):
+            return super().__getitem__(index)
+        elif isinstance(index, tuple):
+            return Line([super().__getitem__(c)[index[1]] for c in range(self.width)])
 
     def content(self):
         """
-        Listaként a mezők
+        listaként a mezők
         """
         return List(self)
-
-    @DeprecationWarning
-    def clone(self):
-        """
-        Klónozza. Ez nem működik
-        """
-        board = Board(self.width, self.height)
-        board.rowTask = self.rowTask
-        board.colTask = self.colTask
-        return board
 
     def __repr__(self) -> str:
         return f'Board[][]::\n{[i for i in self]}'
 
     def print(self):
-        """Vizuálisan megjeleníti a játéktáblát"""
         print("Board[][]::\n")
         for i in range(self.height):
-            print("".join(["▁" if self[i][j] == 0 else "█" if self[i][j] == 1 else "◍" for j in range(self.width)]),
+            print("".join(["▁" if self[i][j] == 0 else "█" if self[i][j] == 1 else "░" for j in range(self.width)]),
                   sep="")
 
-    def getColumn(self, index: int) -> GameLine:
+    def get_column(self, index: int) -> GameLine:
         """Get column by index"""
-        return GameLine((Line(self[index]), self.colTask[index]))
+        return GameLine(self[..., index], self.rowTask[index])
 
-    def getRow(self, index: int) -> GameLine:
+    def get_row(self, index: int) -> GameLine:
         """Get row by index"""
-        return GameLine((Line([self[c][index] for c in range(self.width)]), self.rowTask[index]))
+        return GameLine(Line(self[index]), self.colTask[index])
 
-    def setColumn(self, index: int, line: Line):
+    def set_column(self, index: int, line: Line):
         """Set the column at index"""
-        self[index] = line
-
-    def setRow(self, index: int, line: Line):
-        """Set the row at index"""
         for c in range(self.width):
             self[c][index] = line[c]
 
-    def getField(self, column=0, row=0):
+    def set_row(self, index: int, line: Line):
+        """Set the row at index"""
+        self[index] = line
+
+    def get_field(self, column=0, row=0):
         """Get the specific field by x and y coordinates"""
         return self[column][row]
 
     @staticmethod
-    def procedures() -> list[Procedure]:
+    def procedures() -> set[Procedure]:
         """Register the procedures here. For now, it runs in strict order"""
-        return [GameLine.procIfDone, GameLine.procedureOne, GameLine.procZero, GameLine.procOneDotZero,
-                GameLine.procIfSide, GameLine.procIfImpossibleG, GameLine.procOneFour, GameLine.procIfOneIfBiggerThanAny
-                #GameLine.procedureTwo
-                ]
+        return set(ProcedureLib.PROCEDURES.values())
 
-    def solveRow(self, index: int):
-        '''Applies the procedures to a row at the index and replaces it with the previous one. Return if the line changed'''
-        before = self.getRow(index)
+    def solve_row(self, index: int) -> set[int]:
+        """Applies the procedures to a row at the index and replaces it with the previous one. Return the changed indexes"""
+        diffs = set[int]()
         for proc in Board.procedures():
-            self.setRow(index, proc(self.getRow(index))[0].line)
-        return self.getRow(index) != before
+            game_line, proc_diffs = proc(self.get_row(index))
+            self.set_row(index, game_line.line)
+            diffs = diffs.union(proc_diffs)
+        return diffs
 
-    def rowProc(self, index: int, proc: Procedure):
-        """Applies the given procedure to a row at a given index. Return if the line changed"""
-        before = self.getRow(index)
-        self.setRow(index, proc(self.getRow(index))[0].line)
-        return self.getRow(index) != before
+    def row_proc(self, index: int, proc: Procedure):
+        """Applies the given procedure to a row at a given index. Returns the changed indexes"""
+        game_line, diff = proc(self.get_row(index))
+        self.set_row(index, game_line.line)
+        return diff
 
-    def colProc(self, index: int, proc: Procedure):
-        """Applies the given procedure to a column at a given index. Return if the line changed"""
-        before = self.getColumn(index)
-        self.setColumn(index, proc(self.getColumn(index))[0].line)
-        return self.getColumn(index) != before
+    def col_proc(self, index: int, proc: Procedure):
+        """Applies the given procedure to a column at a given index. Returns the changed indexes"""
+        game_line, diff = proc(self.get_column(index))
+        self.set_column(index, game_line.line)
+        return diff
 
-    def solveColumn(self, index: int):
+    def solve_column(self, index: int) -> set[int]:
         """Applies the procedures to a column at the index and replaces it with the previous one. Return if the line
         changed"""
-        before = self.getColumn(index)
+        diffs = set[int]()
         for proc in self.procedures():
-            self.setColumn(index, proc(self.getColumn(index))[0].line)
-        return self.getColumn(index) != before
+            game_line, proc_diffs = proc(self.get_column(index))
+            self.set_column(index, game_line.line)
+            diffs = diffs.union(proc_diffs)
+        return diffs
 
-    def isSolved(self):
-        """Checks if any field is empty, doesn't actually check if the field are correct"""
-        return self.matchAll(lambda line: not line.contains(0))
+    def is_solved(self):
+        for i in range(self.height):
+            if not self.get_row(i).is_solved():
+                return False
+        return True
 
-    def isEmpty(self):
-        return self.matchAll(lambda line: Line(line).matchAll(lambda value: value == Field.EMPTY))
+    def is_empty(self):
+        return self.match_all(lambda line: Line(line).match_all(lambda value: value == Field.EMPTY))
 
+def solve(board: Board):
+    #while not board.is_solved():
+        for i in range(board.height):
+            if board.is_solved():
+                break
+            chain_solve(board, i, True)
+        for j in range(board.width):
+            if board.is_solved():
+                break
+            chain_solve(board, j, False)
 
-b = Board(10, 10)
-
-
-def chainSolve(board: Board, index: int, row: bool, boardCheck: dict):
+def chain_solve(board: Board, index: int, row: bool):
     KEY = f'{"row" if row else "col"}{index}'
     print(KEY)
-    if boardCheck.get(KEY) == (prev := (board.getRow if row else board.getColumn)(index).line):
-        return False
-    for proc in Board.procedures():
-        (board.rowProc if row else board.colProc)(index, proc)
-    line, _ = (board.getRow if row else board.getColumn)(index)
-    diff = line.getDiffIndexes(prev)
-    boardCheck.update({KEY: line})
+    line_getter: Callable[[int], GameLine] = board.get_row if row else board.get_column
+    line_setter: Callable[[int, Line], None] = board.set_row if row else board.set_column
+    line_solver: Callable[[int], set[int]] = board.solve_row if row else board.solve_column
+    print(line := line_getter(index))
+    if line.is_solved():
+        game_line, diffs = line.procIfDone()
+        line_setter(index, game_line.line)
+        print("SOLVED")
+    else:
+        diffs = line_solver(index)
+    print(f'diffs = {diffs}')
     board.print()
-    diff.forEach(lambda lindex: chainSolve(board, lindex, not row, boardCheck))
-    if board.isEmpty():
-        return chainSolve(board, index + 1 if (switchDir := index < board.width) else 0, not row if switchDir else row,
-                          boardCheck)
-    return True
+    for i in diffs:
+        print("chained")
+        chain_solve(board, i, not row)
+    if not board.is_solved():
+        try:
+            chain_solve(board,
+                        ((index + 1) % (board.width if row else board.height)),
+                        not row if index + 1 >= board.width else row)
+        except Exception as e:
+            board.print()
+            print(e)
+
+    board.print()
 
 
-chainSolve(b, 0, True, {})
-b.print()
+if __name__ == "__main__":
+    #print(Line([1,0,0,0,1,0]).get_dist())
+
+    with open("config.json", "rt") as f:
+        data = json.loads(f.read())
+
+    b = Board(**data)
+
+    solve(b)
+    b.print()
+
+    print(*ProcedureLib.get_names(), sep="\n")
+    
+    #gameline = GameLine(Line([0, 0, 0, 0,0,1,1,-1]), IntList([5]))
+    #print(gameline.continuestartorend())

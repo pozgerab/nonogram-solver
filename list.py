@@ -1,138 +1,129 @@
-from typing import Literal, Callable, Self
+from collections.abc import Callable, Sequence
+from typing import Self, Literal, Iterator
 
-type FieldValue = Literal[-1, 0, 1] # Field value: -1, 0 or 1
+type FieldValue = Literal[-1, 0, 1]  # Field value: -1, 0 or 1
 type Consumer[C] = Callable[[C], None]  # Function with one arg and no return value
-type Function[C,R] = Callable[[C, int], R]   # Function with one arg and one return value
-type Condition[C] = Callable[[C], bool] # Function with one arg and bool return value
-type ConditionWIndex[C] = Callable[[int, C, List[C]], bool]  # Function with an index and another arg and bool return value
-type Reducer[C] = Callable[[C,C], C]  # Function with two arguments and one return value
+type Function[C, R] = Callable[[C, int], R]  # Function with one arg and one return value
+type Condition[C] = Callable[[C], bool]  # Function with one arg and bool return value
+type DoubleCondition[C] = Callable[
+    [int, C, List[C]], bool]  # Function with an index and another arg and bool return value
+type Merger[C] = Callable[[C, C], C]  # Function with two arguments and one return value
+type Transformer[C] = Callable[[C], C]
+type ListType[T] = List[T]
+
 
 class List[T](list[T]):
     """List with more utility\n
     Mostly returns new lists and not references"""
 
+    def __init__(self, *args):
+        if isinstance(args, tuple):
+            super().__init__(*args)
+        else:
+            super().__init__(args)
+
+    @staticmethod
     def of(*args: T):
         return List[T](args)
 
-    def plainer(self):
-        '''Reduces a list of lists to one list of the elements of the nested lists. Only removes one level of nest'''
-        return List(self.reduce(lambda l1, l2: l1 + l2)[0])
-    
-    def map(self, function: Function[T, any]):
+    def __eq__(self, other):
+        return super().__eq__(other)
+
+    def flat(self):
+        """Reduces a list of lists to one list of the elements of the nested lists. Only removes one level of nest"""
+        return self.__class__(self.reduce(lambda l1, l2: l1 + l2))
+
+    def map[K](self, function: Function[T, K]) -> ListType[K]:
         """Maps through the list with a function"""
-        return List([function(el, i) for i, el in enumerate(self)])
-    
-    def forEach(self, consumer: Consumer[T]):
-        '''Executes a consumer for each element of the list'''
+        return self.__class__([function(el, i) for i, el in enumerate(self)])
+
+    def for_each(self, consumer: Consumer[T]):
+        """Executes a consumer for each element of the list"""
         [consumer(el) for el in self]
 
-    def filter(self, condition: Condition[T]):
-        '''Filters the list with a condition'''
-        passed = List[T]()
-        [passed.append(el) if condition(el) else None for el in self]
-        return passed
-    
-    def filterWithIndex(self, condition: ConditionWIndex[T]):
-        '''Filters the list with a condition with index'''
-        filtered = List[T]()
-        [filtered.append(el) if condition(i, el, List[T](self)) else None for i, el in enumerate(self)]
-        return filtered
-    
-    def findHighestIndex(self, condition: Condition[T]):
-        '''Find the highest index where a condition is true'''
+    def filter(self, condition: Condition[T]) -> ListType[T]:
+        """Filters the list with a condition"""
+        return self.__class__([el for el in self if condition(el)])
+
+    def filterWithIndex(self, condition: DoubleCondition[T]) -> ListType[T]:
+        """Filters the list with a condition with index"""
+        return self.__class__([el for i, el in enumerate(self) if condition(i, el, List[T](self))])
+
+    def last_index_of(self, condition: Condition[T]):
+        """Find the highest index where a condition is true"""
         return self.index(self.filter(condition)[-1])
-    
-    def findLowestIndex(self, condition: Condition[T]):
-        '''Find the lowest index where a condition is true'''
+
+    def first_index_of(self, condition: Condition[T]):
+        """Find the lowest index where a condition is true"""
         return self.index(self.filter(condition)[0])
 
-    def contains(self, el: T):
-        '''Whether an element is present'''
-        return self.__contains__(el)
-    
-    def containsCondition(self, condition: Condition[T]):
-        '''If a condition is present at least once'''
-        return self.filter(condition).size() > 0
-    
-    def matchAny(self, condition: Condition[T]):
-        '''If any of the element match the condition'''
+    def match_any(self, condition: Condition[T]):
+        """If any of the element match the condition"""
         for el in self:
-            if condition(el) == True:
+            if condition(el):
                 return True
         return False
-    
-    def matchAll(self, condition: Condition[T]):
-        '''If all of the element match the condition'''
+
+    def match_all(self, condition: Condition[T]):
+        """If all the element match the condition"""
         for el in self:
-            if condition(el) == False:
+            if not condition(el):
                 return False
         return True
-    
-    def matchAllWithIndex(self, conditionWithIndex: ConditionWIndex[T]):
+
+    def matchAllWithIndex(self, conditionWithIndex: DoubleCondition[T]):
         """If all the element match the condition. Iterates with index"""
         for i, el in enumerate(self):
             if not conditionWithIndex(i, el, self):
                 return False
         return True
-    
-    def countCondition(self, condition: Condition[T]):
-        '''Count the element that match the condition'''
-        return len(self.filter(condition))
-    
-    def isEmpty(self): return self.size() == 0
-    
+
+    def is_empty(self):
+        return self.size() == 0
+
+    def edges(self) -> Iterator[T]:
+        if self.is_empty():
+            return iter(())
+        return iter((self[0], self[-1]))
+
     def size(self):
-        '''Lenght of the list'''
+        """Length of the list"""
         return len(self)
-    
-    def reduce(self, reducer: Reducer[T], order: Literal["normal","reversed","twoend"] = "normal"):
-        '''Reduces list. Return a new instance'''
-        new = List(self)
+
+    def reduce(self, reducer: Merger[T], order: Literal["normal", "reversed", "edges"] = "normal") -> T:
+        """Reduces list. Return a new instance"""
+        new = self.__class__(self)
         for i in range(self.size()):
-            if new.size() < 2: return new
-            new[-1 if order == "reversed" else 0] = reducer(new[-1 if order == "reversed" else 0], new[-2 if order == "reversed" else -1 if order == "twoend" else 1])
-            new.pop(-2 if order == "reversed" else -1 if order == "twoend" else 1)
-        return new
-    
-    def getDiffIndexes(self, other: Self):
-        if self == other: return IntList()
-        if self.size() != other.size(): raise Exception("Not equal size")
-        diff = IntList()
-        for i in range(self.size()):
-            if self[i] != other[i]: diff.append(i)
-        return diff
-    
-    def max(self, key: Callable[[T], int]):
-        datamap = {key(i): i for i in self}
-        return datamap[IntList(datamap.keys()).max()]
-    
-    def min(self, key: Callable[[T], int]):
-        datamap = {key(i): i for i in self}
-        return datamap[IntList(datamap.keys()).min()]
-    
+            if new.size() < 2:
+                return new[0]
+            index = -2 if order == "reversed" else -1 if order == "edges" else 1
+            new[-1 if order == "reversed" else 0] = reducer(new[-1 if order == "reversed" else 0], new[index])
+            new.pop(index)
+        return new[0]
+
+    def get_diff_indexes(self, other: Self):
+        return set([i for i, (a, b) in enumerate(zip(self, other)) if a != b])
+
 class IntList(List[int]):
-    '''List of ints'''
+    """List of ints"""
 
     def of(*args: int):
         return IntList(args)
-    
-    def addUp(self):
-        '''Adds the ints together'''
-        v = 0
-        for el in self:
-            v += el
-        return v
-    
-    def min(self) -> int:
-        '''Get the lowest value of the list'''
-        l = IntList(self)
-        l.sort() 
-        return l[0]
-    def max(self) -> int:
-        '''Get the highest value of the list'''
-        l = IntList(self)
-        l.sort()
-        return l[-1]
-    
-class FieldValueList(List[Literal[-1,0,1]]):
-    pass
+
+    def sum(self):
+        """Adds the ints together"""
+        return self.reduce(lambda a, b: a+b)
+
+    def are_adjacent(self):
+        clone = IntList(self)
+        clone.sort()
+        for i, v in enumerate(clone):
+            if i == clone.size() -1:
+                continue
+            if abs(v - clone[i + 1]) != 1:
+                return False
+        return True
+
+
+if __name__ == "__main__":
+    print(len(range(4,5)))
