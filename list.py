@@ -1,13 +1,12 @@
-from collections.abc import Callable, Sequence
-from typing import Self, Literal, Iterator
+import inspect
+from collections.abc import Callable
+from itertools import count
+from typing import Self, Literal, Iterator, overload
 
-type FieldValue = Literal[-1, 0, 1]  # Field value: -1, 0 or 1
-type Consumer[C] = Callable[[C], None]  # Function with one arg and no return value
-type Function[C, R] = Callable[[C, int], R]  # Function with one arg and one return value
-type Condition[C] = Callable[[C], bool]  # Function with one arg and bool return value
-type DoubleCondition[C] = Callable[
-    [int, C, List[C]], bool]  # Function with an index and another arg and bool return value
-type Merger[C] = Callable[[C, C], C]  # Function with two arguments and one return value
+type FieldValue = Literal[-1, 0, 1]
+type Consumer[C] = Callable[[C], None]
+type Condition[C] = Callable[C, bool]
+type Merger[C] = Callable[[C, C], C]
 type Transformer[C] = Callable[[C], C]
 type ListType[T] = List[T]
 
@@ -33,58 +32,83 @@ class List[T](list[T]):
         """Reduces a list of lists to one list of the elements of the nested lists. Only removes one level of nest"""
         return self.__class__(self.reduce(lambda l1, l2: l1 + l2))
 
-    def map[K](self, function: Function[T, K]) -> ListType[K]:
-        """Maps through the list with a function"""
-        return self.__class__([function(el, i) for i, el in enumerate(self)])
+    @overload
+    def map[K](self, function: Callable[[T, int], K]): ...
 
-    def for_each(self, consumer: Consumer[T]):
-        """Executes a consumer for each element of the list"""
-        [consumer(el) for el in self]
+    def map[K](self, function: Callable[[T], K]):
+        param_count = len(inspect.signature(function).parameters)
+        if param_count == 2:
+            return self.__class__([function(el, i) for i, el in enumerate(self)])
+        elif param_count == 1:
+            return self.__class__([function(el) for el in self])
+        else:
+            raise TypeError("Callable must accept 1 or 2 arguments")
 
-    def filter(self, condition: Condition[T]) -> ListType[T]:
+    @overload
+    def filter(self, condition: Condition[[T, int, Self]]):
+        """Filters the list with a condition with index"""
+        return self.__class__([el for i, el in enumerate(self) if condition(el, i, List[T](self))])
+
+    def filter(self, condition: Condition[[T]]):
         """Filters the list with a condition"""
         return self.__class__([el for el in self if condition(el)])
 
-    def filterWithIndex(self, condition: DoubleCondition[T]) -> ListType[T]:
-        """Filters the list with a condition with index"""
-        return self.__class__([el for i, el in enumerate(self) if condition(i, el, List[T](self))])
-
-    def last_index_of(self, condition: Condition[T]):
+    def last_index_of(self, condition: Condition[[T]]):
         """Find the highest index where a condition is true"""
         return self.index(self.filter(condition)[-1])
 
-    def first_index_of(self, condition: Condition[T]):
+    def first_index_of(self, condition: Condition[[T]]):
         """Find the lowest index where a condition is true"""
         return self.index(self.filter(condition)[0])
 
-    def match_any(self, condition: Condition[T]):
-        """If any of the element match the condition"""
-        for el in self:
-            if condition(el):
-                return True
-        return False
+    @overload
+    def match_any(self, condition: Condition[[T, int]]): ...
 
-    def match_all(self, condition: Condition[T]):
-        """If all the element match the condition"""
-        for el in self:
-            if not condition(el):
-                return False
-        return True
+    def match_any(self, condition: Condition[[T]]):
+        param_count = len(inspect.signature(condition).parameters)
+        if param_count == 2:
+            return any(condition(i, el) for i, el in enumerate(self))
+        elif param_count == 1:
+            return any(condition(el) for el in self)
+        else:
+            raise TypeError("Callable must accept 1 or 2 arguments")
 
-    def matchAllWithIndex(self, conditionWithIndex: DoubleCondition[T]):
-        """If all the element match the condition. Iterates with index"""
-        for i, el in enumerate(self):
-            if not conditionWithIndex(i, el, self):
-                return False
-        return True
+    @overload
+    def match_all(self, condition: Condition[[T, int]]): ...
+
+    def match_all(self, condition: Condition[[T]]):
+        param_count = len(inspect.signature(condition).parameters)
+        if param_count == 2:
+            return all(condition(i, el) for i, el in enumerate(self))
+        elif param_count == 1:
+            return all(condition(el) for el in self)
+        else:
+            raise TypeError("Callable must accept 1 or 2 arguments")
 
     def is_empty(self):
         return self.size() == 0
 
-    def edges(self) -> Iterator[T]:
+    def edges(self):
         if self.is_empty():
-            return iter(())
-        return iter((self[0], self[-1]))
+            return ()
+        return self[0], self[-1]
+
+    def split_index(self, index: int, end: int = None):
+        return self.__class__(self[:index]), self.__class__(self[(end or index) + 1:])
+
+    def split(self, delimiter: T, limit: int = None):
+        counter = count(1)
+        copy = self.__class__(self)
+        while copy:
+            if delimiter not in copy:
+                yield copy
+                break
+            index = copy.index(delimiter)
+            if limit and next(counter) > limit:
+                yield copy
+                break
+            a, copy = copy.split_index(index)
+            yield a
 
     def size(self):
         """Length of the list"""
@@ -103,6 +127,9 @@ class List[T](list[T]):
 
     def get_diff_indexes(self, other: Self):
         return set([i for i, (a, b) in enumerate(zip(self, other)) if a != b])
+
+    def is_all_exclusive(self):
+        return self.size() == len(set(self))
 
 class IntList(List[int]):
     """List of ints"""
@@ -126,4 +153,8 @@ class IntList(List[int]):
 
 
 if __name__ == "__main__":
-    print(len(range(4,5)))
+    hf = IntList([0,1,2,3,4])
+    del hf[0]
+    print(hf)
+    print(None or 0)
+    print(list(IntList([0,1,2,3,4]).edges()))
