@@ -4,12 +4,10 @@ from typing import Literal, Self
 
 from portion import Interval, iterate, closed
 
-from list import List, IntList, FieldValue
+from list import List, IntList, FieldValue, join
 
-type ProcReturn = tuple[GameLine, set[int]]
-type ProcInput = [GameLine]
-type Solverithm = Callable[ProcInput, GameLine]
-type Procedure = Callable[ProcInput, ProcReturn]
+type Procedure = Callable[[GameLine], tuple[GameLine, set[int]]]
+type Divider = Callable[[GameLine], list[tuple[range, GameLine]]]
 
 
 class Field:
@@ -18,13 +16,13 @@ class Field:
     EXCLUDE: FieldValue = -1
 
     @staticmethod
-    def values():
+    def fieldset():
         return {Field.COLOR, Field.EMPTY, Field.EXCLUDE}
 
 
 class Line(List[Literal[-1, 0, 1]]):
-    def __init__(self, __iterable: Iterable[FieldValue]):
-        super().__init__(__iterable)
+    def __init__(self, __iterable: Iterable[FieldValue], **kwargs):
+        super().__init__(__iterable, **kwargs)
 
     def __or__(self, other: Self):
         if isinstance(other, Line) and len(self) == len(other):
@@ -40,8 +38,12 @@ class Line(List[Literal[-1, 0, 1]]):
 
     @staticmethod
     def values(func):
-        """Indicates that the returned values are the field values (-1 <= x <= 1)"""
+        """Indicates that the returned values are the field values (-1 | 0 | 1)"""
         return func
+
+    @staticmethod
+    def disallowx(n: FieldValue):
+        return n != -1
 
     @staticmethod
     def validate(func: Callable):
@@ -58,9 +60,6 @@ class Line(List[Literal[-1, 0, 1]]):
     def set_in_bound(self, index: int, value: FieldValue):
         if self.in_bound(index):
             self.set_field(index, value)
-
-    def in_bound_upper(self, index: int):
-        return index < self.size()
 
     def in_bound(self, index: int):
         return 0 <= index < self.size()
@@ -133,7 +132,7 @@ class Line(List[Literal[-1, 0, 1]]):
 
     @indexes
     def slice_by(self, field: FieldValue):
-        return self.group_adjacent_fields(Field.values() - {field})
+        return self.group_adjacent_fields(Field.fieldset() - {field})
 
     @indexes
     def slice_by_x(self):
@@ -182,6 +181,7 @@ class IndexList(IntList):
 
 class ProcedureLib:
     PROCEDURES: dict[str, Procedure] = dict()
+    DIVIDERS: dict[str, Divider] = dict()
     @staticmethod
     def get_names() -> set[str]:
         return set(ProcedureLib.PROCEDURES.keys())
@@ -189,7 +189,11 @@ class ProcedureLib:
 class GameLine(tuple[Line, IntList]):
 
     def __init__(self, line: Line, task: IntList):
-        self.line, self.task = line, IntList(task)
+        self.__line, self.task = line, IntList(task)
+
+    @property
+    def line(self):
+        return self.__line
 
     def __new__(cls, line: Line, task: IntList):
         instance = super().__new__(cls, (line, task))
@@ -198,12 +202,41 @@ class GameLine(tuple[Line, IntList]):
     def __repr__(self):
         return ",".join(str(e) for e in self.task) + "|".join(["▁▁" if self.line[i] == 0 else "██" if self.line[i] == 1 else "░░" for i in range(self.line.size())])
 
-    def clone(self):
-        return self.__class__(Line(self.line), IntList(self.task))
+    @staticmethod
+    def procedure(name: str):
+        def decorator(procedure: "Callable[[GameLine], GameLine]"):
+            def wrapper(game_line) -> "tuple[GameLine, set[int]]":
+                before = Line(game_line.line)
+                after: GameLine = procedure(game_line)
+                diffs = before.get_diff_indexes(after.line)
+                print(f"Procedure '{name}' executed. Diffs: {diffs}")
+                return after, diffs
 
+            ProcedureLib.PROCEDURES[name] = wrapper
+            return wrapper
+
+        return decorator
+
+    @staticmethod
+    def divider(name: str):
+        def decorator(divider: Divider):
+            def wrapper(game_line) -> "list[tuple[range, GameLine]]":
+                divided = List(divider(game_line))
+                divided = divided.filter(lambda div: len(div[0]) < game_line.line.size())
+                print(f"Divider '{name}' executed")
+                print(f'\tdivided = {list(divided)}')
+                return divided
+            ProcedureLib.DIVIDERS[name] = wrapper
+            return wrapper
+
+        return decorator
+
+    def possible_finished_groups(self) -> List[IndexList]:
+        return self.line.group_adjacent_field(Field.COLOR).filter(lambda group: self.task.match_any(lambda _t: _t == group.size()))
+
+    @divider(name = "splits if a task is certainly finished")
     def split(self):
         finished_groups = self.line.finished_tasks()
-        print(f"finished_groups = {finished_groups}")
         tasks_copy = IntList(self.task)
         line_copy = Line(self.line)
         range_copy = range(self.line.size())
@@ -238,8 +271,6 @@ class GameLine(tuple[Line, IntList]):
 
             for iter_index, (group, tasks) in enumerate(finished_blocks):
 
-                print(f'i, g, t = {iter_index, group, tasks}')
-
                 if tasks_copy.is_unique(tasks):
                     tasks_indexes = tasks_copy.index(tasks)
                     sep_range = range(range_copy[0], group[0])
@@ -250,51 +281,83 @@ class GameLine(tuple[Line, IntList]):
                     yield sep_range, GameLine(Line(sep_line), IntList(sep_task))
                     break
 
-                print(f'tasks_copy = {tasks_copy}')
-
                 possible_indexes: List[IntList] = tasks_copy.all_index(tasks)
-                print(f'poss_indexes = {possible_indexes}')
                 passed_indexes: list[IntList] = []
                 before_line, after_line = line_copy.split_index(*(index - range_copy[0] for index in group.edges())) # subtract the offset
-                print(f'before_l, after_l = {before_line, after_line}')
                 for indexes in possible_indexes:
-                    print(f'try possible = {indexes}')
                     before_tasks, after_tasks = tasks_copy.split_index(*indexes.edges())
-                    print(f'bef, aft = {before_tasks, after_tasks}')
                     before_min, after_min = sum(before_tasks, max(len(before_tasks) - 1, 0)), sum(after_tasks, max(len(after_tasks) - 1, 0))
                     if before_line.size() >= before_min and after_line.size() >= after_min:
-                        print(f'passed')
                         passed_indexes.append(indexes)
-                print(f'passed_indexes =  {passed_indexes}')
                 if len(passed_indexes) == 1:
                     found_indexes = passed_indexes[0]
                     sep_range = range(range_copy[0], group[0])
                     sep_line, line_copy = line_copy.split_index(*(index - range_copy[0] for index in group.edges()))
-                    print(f'found_indexes = {found_indexes}')
                     sep_task, tasks_copy = tasks_copy.split_index(*found_indexes.edges())
-                    print(f'sep_task = {sep_task}')
-                    print(f'tasks_copy = {tasks_copy}')
                     range_copy = range(group[-1] + 1, self.line.size())
                     yield sep_range, GameLine(Line(sep_line), IntList(sep_task))
                 del finished_blocks[iter_index]
 
         if tasks_copy and line_copy and self.line.size() != line_copy.size():
-            yield range_copy, GameLine(Line(line_copy), IntList(tasks_copy))
+            yield range_copy, GameLine(line_copy, tasks_copy)
 
-    @staticmethod
-    def procedure(name: str):
-        def decorator(procedure: Solverithm):
-            def wrapper(game_line) -> ProcReturn:
-                before = Line(game_line.line)
-                after: GameLine = procedure(game_line)
-                diffs = before.get_diff_indexes(after.line)
-                print(f"Procedure '{name}' executed. Diffs: {diffs}")
-                return after, diffs
+    @divider(name = "if started == tasks")
+    def splitifstartedeqtask(self):
+        groups = self.line.slice_by_x_contains_o()
+        if groups.size() == self.task.size():
+            for i, group in enumerate(groups):
+                yield range(group[0], group[-1] + 1), GameLine(group.values(), IntList([self.task[i]]))
 
-            ProcedureLib.PROCEDURES[name] = wrapper
-            return wrapper
+    @divider(name = "remove start-end excludes")
+    def trim(self):
+        if Field.EXCLUDE not in self.line.edges(): return
+        yield range(*self.line.slice_by_x().flat().edges()), GameLine(Line(join(-1, self.line.slice_by_x().map(lambda _gr: _gr.values()))), self.task)
 
-        return decorator
+    @divider(name = "separate unconnectable")
+    def seperateunconnectable(self):
+        color_groups = self.line.group_adjacent_field(Field.COLOR)
+        if self.task.size() >= color_groups.size():
+            return
+        excess_group_am = color_groups.size() - self.task.size()
+        if excess_group_am != 1:
+            return
+        for i, (first, second) in enumerate(color_groups.n_lenght_adjacent_subsets(2)):
+            dist = second[-1] - first[0] + 1
+            if dist > self.task[i]:
+                bef_task, aft_task = self.task.split_index(i, remove_index = False)
+
+                bef_line, aft_line = self.line.split_index(second[0], first[-1])
+                yield range(first[-1] + 1, self.line.size()), GameLine(Line(aft_line, clause = Line.disallowx), aft_task)
+                yield range(0, second[0]), GameLine(Line(bef_line, clause = Line.disallowx), bef_task)
+
+    @divider(name = "if individual tasks cant fit with before tasks")
+    def inidvidualtask(self):
+        x_slices = self.line.slice_by_x()
+        if x_slices.size() == 1:
+            return
+        for i, task in enumerate(self.task):
+
+            #   TODO    Do this with combinations of tasks (n_length_subsets)
+
+            passed_groups = List()
+            for g_i, group in enumerate(x_slices):
+                is_last = g_i == x_slices.size() - 1
+                if g_i == 0:
+                    before_task, _ = self.task.split_index(i)
+                    if sum(before_task, task + before_task.size()) <= group.size():
+                        passed_groups.append(g_i)
+                elif not is_last:
+                    if task <= group:
+                        passed_groups.append(g_i)
+                else:
+                    _, after_task = self.task.split_index(i)
+                    if sum(after_task, task + after_task.size()) <= group.size():
+                        passed_groups.append(g_i)
+
+            if passed_groups.size() == 1:
+                group = x_slices[passed_groups[0]]
+                yield range(group[0], group[-1] + 1), GameLine(Line(group.values(), clause = Line.disallowx), IntList([task]))
+
 
     def get_too_small_groups(self):
         return self.line.slice_by_x_all_empty().filter(lambda group: self.task.match_all(lambda task: task > group.size()))
@@ -307,6 +370,18 @@ class GameLine(tuple[Line, IntList]):
         if self.is_solved():
             for ind in self.line.indexes_of_field(Field.EMPTY):
                 self.line.exclude(ind)
+        return self
+
+    @procedure(name = "first or last group is smaller than first or last task")
+    def exclfirstsmall(self):
+        while self.line.slice_by_x()[0].size() < self.task[0]:
+            for field in self.line.slice_by_x()[0]:
+                self.line.exclude(field)
+
+        while self.line.slice_by_x()[-1].size() < self.task[-1]:
+            for field in self.line.slice_by_x()[-1]:
+                self.line.exclude(field)
+
         return self
 
     @procedure("if empty group = task amount && group size = task -> color all")
@@ -331,11 +406,6 @@ class GameLine(tuple[Line, IntList]):
     def procedureOne(self):
 
         taskSize = self.task.size()
-        slicedbyx = self.line.slice_by_x()
-        original: Line | None = None
-        if slicedbyx.size() == 1:
-            original = Line(self.line)
-            self.line = Line([self.line[i] for i in slicedbyx[0]])
 
         iterator = 0
         taskMap = {i: {"start": 0, "end": 0} for i in range(
@@ -355,11 +425,6 @@ class GameLine(tuple[Line, IntList]):
         for p in intervalMap.values():  # Végigmegy az intervallumokon és kiszínezi a mezőket
             for field in iterate(p, 1):
                 self.line.fill(field)
-
-        if original:
-            for i, og_index in enumerate(slicedbyx[0]):
-                original[og_index] = self.line[i]
-            self.line = original
         return self
 
     @procedure("if color on side -> its always the start")
@@ -383,12 +448,6 @@ class GameLine(tuple[Line, IntList]):
     def continuestartorend(self):
         if Field.COLOR not in self.line:
             return self
-        slicex = self.line.slice_by_x()
-        original: Line | None = None
-        if slicex.size() == 1:
-            slice_line = slicex[0]
-            original = Line(self.line)
-            self.line = Line([self.line[i] for i in slice_line])
 
         first_task, last_task = self.task.edges()
         first_color, last_color = self.line.indexes_of_field(Field.COLOR).edges()
@@ -405,15 +464,12 @@ class GameLine(tuple[Line, IntList]):
             if len(last_continue_range) == last_task - 1:
                 self.line.set_in_bound(self.line.size() - last_task - 1, Field.EXCLUDE)
 
-        if original:
-            for i, og_index in enumerate(slice_line):
-                original[og_index] = self.line[i]
-            self.line = original
-
         return self
 
-    @procedure("if biggest task can be only in one group -> run default start proc")
+    @procedure("if biggest task can be only in one group -> procone")
     def procIfOneIfBiggerThanAny(self):
+        if self.task.size() == 1 or Field.COLOR not in self.line:
+            return self
         started = self.line.slice_by_x()
 
         biggestTask = max(self.task)
@@ -422,10 +478,11 @@ class GameLine(tuple[Line, IntList]):
             biggestG = bigGs[0]
 
             subLine = Line([self.line[i] for i in biggestG])
-            subGameLine = GameLine(subLine, IntList.of(biggestTask))
+            subGameLine = GameLine(subLine, IntList([biggestTask]))
             subGameLine.procedureOne()
 
-            [self.line.set_field(biggestG[i], v) for i, v in enumerate(subGameLine.line)]
+            for i, v in enumerate(subGameLine.line):
+                self.line.set_field(biggestG[i], v)
 
         return self
 
@@ -520,8 +577,7 @@ class GameLine(tuple[Line, IntList]):
 
         return self
 
-
-class Board(List[List[FieldValue]]):
+class Board(List[list[FieldValue]]):
 
     def __init__(self, width=10, height=10, **kwargs):
         super().__init__()
@@ -571,6 +627,10 @@ class Board(List[List[FieldValue]]):
         """Register the procedures here. For now, it runs in strict order"""
         return set(ProcedureLib.PROCEDURES.values())
 
+    @staticmethod
+    def dividers() -> set[Divider]:
+        return set(ProcedureLib.DIVIDERS.values())
+
     def solve_row(self, index: int) -> set[int]:
         """Applies the procedures to a row at the index and replaces it with the previous one. Return the changed indexes"""
         diffs = set[int]()
@@ -578,15 +638,15 @@ class Board(List[List[FieldValue]]):
             game_line, proc_diffs = proc(self.get_row(index))
             self.set_row(index, game_line.line)
             diffs = diffs.union(proc_diffs)
-        for index_range, line_slice in self.get_row(index).split():
-            print(index_range, line_slice)
-            for proc in Board.procedures():
-                game_slice, proc_diffs = proc(line_slice)
-                row = self.get_row(index)
-                for i, slice_index in enumerate(index_range):
-                    row.line.set_field(slice_index, game_slice.line[i])
-                self.set_row(index, row.line)
-                diffs = diffs.union(proc_diffs)
+        for divider in Board.dividers():
+            for index_range, line_slice in divider(self.get_row(index)):
+                for proc in Board.procedures():
+                    game_slice, proc_diffs = proc(line_slice)
+                    row = self.get_row(index)
+                    for i, slice_index in enumerate(index_range):
+                        row.line.set_field(slice_index, game_slice.line[i])
+                    self.set_row(index, row.line)
+                    diffs = diffs.union(proc_diffs)
         return diffs
 
     def row_proc(self, index: int, proc: Procedure) -> set[int]:
@@ -609,15 +669,15 @@ class Board(List[List[FieldValue]]):
             game_line, proc_diffs = proc(self.get_column(index))
             self.set_column(index, game_line.line)
             diffs = diffs.union(proc_diffs)
-        for index_range, line_slice in self.get_column(index).split():
-            print(index_range, line_slice)
-            for proc in Board.procedures():
-                game_slice, proc_diffs = proc(line_slice)
-                row = self.get_column(index)
-                for i, slice_index in enumerate(index_range):
-                    row.line.set_field(slice_index, game_slice.line[i])
-                self.set_column(index, row.line)
-                diffs = diffs.union(proc_diffs)
+        for divider in Board.dividers():
+            for index_range, line_slice in divider(self.get_column(index)):
+                for proc in Board.procedures():
+                    game_slice, proc_diffs = proc(line_slice)
+                    row = self.get_column(index)
+                    for i, slice_index in enumerate(index_range):
+                        row.line.set_field(slice_index, game_slice.line[i])
+                    self.set_column(index, row.line)
+                    diffs = diffs.union(proc_diffs)
         return diffs
 
     def is_solved(self):
@@ -656,8 +716,8 @@ def chain_solve(board: Board, index: int, row: bool):
         diffs = line_solver(index)
     print(f'diffs = {diffs}')
     board.print()
-    if board.get(9,6) == 1:
-        input()
+    #if board.get(9,6) == 1:
+    #    input()
     #input()
 
 

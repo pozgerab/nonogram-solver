@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import inspect
 import sys
 from collections import deque
@@ -6,30 +8,38 @@ from itertools import count
 from typing import Self, Literal, overload
 
 type FieldValue = Literal[-1, 0, 1]
-type Consumer[C] = Callable[[C], None]
-type Condition[C] = Callable[C, bool]
-type Merger[C] = Callable[[C, C], C]
-type Transformer[C] = Callable[[C], C]
 type ListType[T] = List[T]
 type IntListType = ListType[int]
 
-
-class List[T](list[T]):
+class List[T](list):
     """List with more utility\n
     Mostly returns new lists and not references"""
 
-    def __init__(self, *args):
-        if isinstance(args, tuple):
+    @overload
+    def __init__(self, *args, clause: Callable[[T], bool] = None): ...
+
+    @overload
+    def __init__(self, *args: Sequence[T], clause: Callable[[T], bool] = None): ...
+
+    def __init__(self, *args, **kwargs):
+        if isinstance(args, Sequence):
             super().__init__(*args)
-        else:
-            super().__init__(args)
+        else: super().__init__(args)
+        clause = kwargs.get("clause")
+        self._clause = None
+        if clause is not None and isinstance(clause, Callable):
+            self._clause = clause
 
     @staticmethod
     def of(*args: T):
         return List[T](args)
 
-    def __eq__(self, other):
-        return super().__eq__(other)
+    def __setitem__(self, key, value):
+        if not self._clause or self._clause(value):
+            super().__setitem__(key, value)
+
+    def set_clause(self, clause: Callable[[T], bool]):
+        self._clause = clause
 
     def flat(self):
         """Reduces a list of lists to one list of the elements of the nested lists. Only removes one level of nest"""
@@ -40,6 +50,11 @@ class List[T](list[T]):
         def wrapper(self, *args, **kwargs):
             return self.__class__(func(self, *args, **kwargs))
         return wrapper
+
+    def __getitem__(self, item):
+        if isinstance(item, slice):
+            return self.__class__(super().__getitem__(item))
+        return super().__getitem__(item)
 
     @staticmethod
     def wrap_intlist(func):
@@ -56,9 +71,12 @@ class List[T](list[T]):
         return _method
 
     @overload
-    def map[K](self, function: Callable[[T, int], K]): ...
+    def map[K](self, function: Callable[[T, int], K]) -> "List[K]": ...
 
-    def map[K](self, function: Callable[[T], K]):
+    @overload
+    def map[K](self, function: Callable[[T], K]) -> "List[K]": ...
+
+    def map(self, function):
         param_count = len(inspect.signature(function).parameters)
         if param_count == 2:
             return self.__class__([function(el, i) for i, el in enumerate(self)])
@@ -68,26 +86,35 @@ class List[T](list[T]):
             raise TypeError("Callable must accept 1 or 2 arguments")
 
     @overload
-    def filter(self, condition: Condition[[T, int, Self]]):
-        """Filters the list with a condition with index"""
-        return self.__class__([el for i, el in enumerate(self) if condition(el, i, List[T](self))])
+    def filter(self, condition: Callable[[T, int, Self], bool]) -> Self: ...
 
-    def filter(self, condition: Condition[[T]]):
-        """Filters the list with a condition"""
-        return self.__class__([el for el in self if condition(el)])
+    @overload
+    def filter(self, condition: Callable[[T], bool]) -> Self: ...
 
-    def last_index_of(self, condition: Condition[[T]]):
+    def filter(self, condition):
+        param_count = len(inspect.signature(condition).parameters)
+        if param_count == 3:
+            return self.__class__([el for i, el in enumerate(self) if condition(el, i, List(self))])
+        elif param_count == 1:
+            return self.__class__([el for el in self if condition(el)])
+        else:
+            raise TypeError("Callable must accept 1 or 2 arguments")
+
+    def last_index_of(self, condition: Callable[[T], bool]):
         """Find the highest index where a condition is true"""
         return self.index(self.filter(condition)[-1])
 
-    def first_index_of(self, condition: Condition[[T]]):
+    def first_index_of(self, condition: Callable[[T], bool]):
         """Find the lowest index where a condition is true"""
         return self.index(self.filter(condition)[0])
 
     @overload
-    def match_any(self, condition: Condition[[T, int]]): ...
+    def match_any(self, condition: Callable[[T, int], bool]) -> bool: ...
 
-    def match_any(self, condition: Condition[[T]]):
+    @overload
+    def match_any(self, condition: Callable[[T], bool]) -> bool: ...
+
+    def match_any(self, condition):
         param_count = len(inspect.signature(condition).parameters)
         if param_count == 2:
             return any(condition(i, el) for i, el in enumerate(self))
@@ -97,9 +124,12 @@ class List[T](list[T]):
             raise TypeError("Callable must accept 1 or 2 arguments")
 
     @overload
-    def match_all(self, condition: Condition[[T, int]]): ...
+    def match_all(self, condition: Callable[[T], bool]) -> bool: ...
 
-    def match_all(self, condition: Condition[[T]]):
+    @overload
+    def match_all(self, condition: Callable[[T, int], bool]) -> bool: ...
+
+    def match_all(self, condition):
         param_count = len(inspect.signature(condition).parameters)
         if param_count == 2:
             return all(condition(i, el) for i, el in enumerate(self))
@@ -111,13 +141,13 @@ class List[T](list[T]):
     def is_empty(self):
         return self.size() == 0
 
-    def edges(self):
+    def edges(self) -> tuple[T, T]:
         if self.is_empty():
-            return ()
+            raise ValueError("empty list")
         return self[0], self[-1]
 
-    def split_index(self, index: int, end: int = None):
-        return self.__class__(self[:index]), self.__class__(self[(end or index) + 1:])
+    def split_index(self, index: int, end: int = None, remove_index: bool = True):
+        return self[:index], self[(end or index) + remove_index:]
 
     def split(self, delimiter: T, limit: int = None):
         counter = count(1)
@@ -134,10 +164,10 @@ class List[T](list[T]):
             yield a
 
     @overload
-    def all_index(self, __value: T) -> ListType[IntListType]: ...
+    def all_index(self, __value: T) -> List[IntList]: ...
 
     @overload
-    def all_index(self, __value: Sequence[T]) -> ListType[IntListType]: ...
+    def all_index(self, __value: Sequence[T]) -> List[IntList]: ...
 
     @wrap_list
     def all_index(self, __value):
@@ -188,7 +218,7 @@ class List[T](list[T]):
     def index(self, __value: T, __start = 0, __stop = sys.maxsize) -> int: ...
 
     @overload
-    def index(self, __value: Sequence[T], __start = 0, __stop = sys.maxsize) -> IntListType: ...
+    def index(self, __value: Sequence[T], __start = 0, __stop = sys.maxsize) -> IntList: ...
 
     def index(self, __value, __start = 0, __stop = sys.maxsize):
         if isinstance(__value, Sequence):
@@ -259,7 +289,7 @@ class List[T](list[T]):
         else:
             return not index
 
-    def reduce(self, reducer: Merger[T], order: Literal["normal", "reversed", "edges"] = "normal") -> T:
+    def reduce(self, reducer: Callable[[T, T], T], order: Literal["normal", "reversed", "edges"] = "normal") -> T:
         """Reduces list. Return a new instance"""
         new = self.__class__(self)
         for i in range(self.size()):
@@ -276,15 +306,18 @@ class List[T](list[T]):
     def is_all_exclusive(self):
         return self.size() == len(set(self))
 
+    def n_lenght_adjacent_subsets(self, n: int) -> List[Self]:
+        return self.__class__([self[i:i+n] for i in range(len(self) - n + 1)])
+
 class IntList(List[int]):
     """List of ints"""
 
-    def of(*args: int):
-        return IntList(args)
+    @overload
+    def __init__(self, *args: Sequence[int], clause: Callable[[int], bool] = None): ...
 
-    def sum(self):
-        """Adds the ints together"""
-        return self.reduce(lambda a, b: a+b)
+    def __init__(self, *args, **kwargs):
+
+        super().__init__(*args, **kwargs)
 
     def are_adjacent(self):
         clone = IntList(self)
@@ -296,6 +329,21 @@ class IntList(List[int]):
                 return False
         return True
 
+@overload
+def join[K](delimiter: Sequence[K], elements: Sequence[Sequence[K]]) -> List[K]: ...
+
+@overload
+def join[K](delimiter: K, elements: Sequence[Sequence[K]]) -> List[K]: ...
+
+def join(delimiter, elements):
+    newl = List()
+    delimiter = delimiter if isinstance(delimiter, Sequence) else [delimiter]
+    for el in elements:
+        newl += el
+        newl += delimiter
+    del newl[-len(delimiter):]
+    return newl
 
 if __name__ == "__main__":
-    print(IntList([7,1]).split_index(1))
+    b = IntList([0,1,2,3])
+    print(b.split_index(0, remove_index=False))
