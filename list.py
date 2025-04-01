@@ -7,13 +7,13 @@ from collections.abc import Callable, Sequence
 from itertools import count
 from typing import Self, Literal, overload
 
+from numpy.linalg.lapack_lite import zungqr
+
 type FieldValue = Literal[-1, 0, 1]
 type ListType[T] = List[T]
 type IntListType = ListType[int]
 
-class List[T](list):
-    """List with more utility\n
-    Mostly returns new lists and not references"""
+class List[T](list[T]):
 
     @overload
     def __init__(self, *args, clause: Callable[[T], bool] = None): ...
@@ -30,6 +30,9 @@ class List[T](list):
         if clause is not None and isinstance(clause, Callable):
             self._clause = clause
 
+    def __add__(self, other):
+        return self.__class__(super().__add__(other))
+
     @staticmethod
     def of(*args: T):
         return List[T](args)
@@ -43,7 +46,7 @@ class List[T](list):
 
     def flat(self):
         """Reduces a list of lists to one list of the elements of the nested lists. Only removes one level of nest"""
-        return self.__class__(self.reduce(lambda l1, l2: l1 + l2))
+        return self.__class__(sum(self, []))
 
     @staticmethod
     def wrap_list(func):
@@ -51,9 +54,18 @@ class List[T](list):
             return self.__class__(func(self, *args, **kwargs))
         return wrapper
 
+    @overload
+    def __getitem__(self, item: range | slice) -> Self: ...
+
+    @overload
+    def __getitem__(self, item: int) -> T: ...
+
     def __getitem__(self, item):
         if isinstance(item, slice):
             return self.__class__(super().__getitem__(item))
+        if isinstance(item, range):
+            _slice = slice(item.start, item.stop, item.step)
+            return self.__class__(super().__getitem__(_slice))
         return super().__getitem__(item)
 
     @staticmethod
@@ -108,6 +120,10 @@ class List[T](list):
         """Find the lowest index where a condition is true"""
         return self.index(self.filter(condition)[0])
 
+    def matches_n(self, condition: Callable[[T], bool], n: int):
+        matched = self.filter(condition)
+        return matched.size() == n, matched
+
     @overload
     def match_any(self, condition: Callable[[T, int], bool]) -> bool: ...
 
@@ -147,7 +163,10 @@ class List[T](list):
         return self[0], self[-1]
 
     def split_index(self, index: int, end: int = None, remove_index: bool = True):
-        return self[:index], self[(end or index) + remove_index:]
+        return self[:index], self[(0 if end == 0 else (end or index)) + remove_index:]
+
+    def split_index_intersect(self, intersect_start: int, intersect_end: int = None):
+        return self.split_index((intersect_end or intersect_start) + 1, intersect_start, remove_index=False)
 
     def split(self, delimiter: T, limit: int = None):
         counter = count(1)
@@ -164,7 +183,7 @@ class List[T](list):
             yield a
 
     @overload
-    def all_index(self, __value: T) -> List[IntList]: ...
+    def all_index(self, __value: T) -> IntList: ...
 
     @overload
     def all_index(self, __value: Sequence[T]) -> List[IntList]: ...
@@ -345,5 +364,6 @@ def join(delimiter, elements):
     return newl
 
 if __name__ == "__main__":
-    b = IntList([0,1,2,3])
-    print(b.split_index(0, remove_index=False))
+    a = List([2,3,3,4])
+    print(a[range(0,2,1)])
+    print(a)
