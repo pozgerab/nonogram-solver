@@ -7,12 +7,6 @@ from collections.abc import Callable, Sequence
 from itertools import count
 from typing import Self, Literal, overload
 
-from numpy.linalg.lapack_lite import zungqr
-
-type FieldValue = Literal[-1, 0, 1]
-type ListType[T] = List[T]
-type IntListType = ListType[int]
-
 class List[T](list[T]):
 
     @overload
@@ -364,6 +358,5 @@ def join(delimiter, elements):
     return newl
 
 if __name__ == "__main__":
-    a = List([2,3,3,4])
-    print(a[range(0,2,1)])
-    print(a)
+    a = range(5)
+    print(a[-1])

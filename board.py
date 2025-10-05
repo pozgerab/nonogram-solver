@@ -1,15 +1,18 @@
 import json
 from collections.abc import Callable, Iterable
 from itertools import repeat
+from math import ceil, log10
+from types import EllipsisType
 from typing import Literal, Self, overload, Sequence
 
 from portion import Interval, iterate, closed
 
-from list import List, IntList, FieldValue, join
+from list import List, IntList, join
 
 type Procedure = Callable[[GameLine], tuple[GameLine, set[int]]]
 type Divider = Callable[[GameLine], list[tuple[range, GameLine]]]
 
+type FieldValue = Literal[-1, 0, 1]
 
 class Field:
     COLOR: FieldValue = 1
@@ -17,8 +20,11 @@ class Field:
     EXCLUDE: FieldValue = -1
 
     @staticmethod
-    def fieldset():
+    def fieldset() -> set[FieldValue]:
         return {Field.COLOR, Field.EMPTY, Field.EXCLUDE}
+
+def offset_set[T](og: set, offset: int) -> set[T]:
+    return {e + offset for e in og}
 
 
 class Line(List[Literal[-1, 0, 1]]):
@@ -28,8 +34,9 @@ class Line(List[Literal[-1, 0, 1]]):
     def __or__(self, other: Self):
         if isinstance(other, Line) and len(self) == len(other):
             return Line([self[i] or other[i] for i in range(self.size())])
+        return None
 
-    def get_index_if_value_is(self, index: int, value: FieldValue):
+    def get_index_if_value_is(self, index: int, value: FieldValue) -> int | None:
         return index if self[index] == value else None
 
     @staticmethod
@@ -43,7 +50,7 @@ class Line(List[Literal[-1, 0, 1]]):
         return func
 
     @staticmethod
-    def disallowx(n: FieldValue):
+    def disallowx(n: FieldValue) -> bool:
         return n != -1
 
     @staticmethod
@@ -62,7 +69,7 @@ class Line(List[Literal[-1, 0, 1]]):
         if self.in_bound(index):
             self.set_field(index, value)
 
-    def in_bound(self, index: int):
+    def in_bound(self, index: int) -> bool:
         return 0 <= index < self.size()
 
     def get(self, index: int):
@@ -71,7 +78,7 @@ class Line(List[Literal[-1, 0, 1]]):
     def set_field(self, index: int, value: FieldValue):
         self[index] = value
 
-    def values_from_indexes(self, indexes: IntList) -> Self:
+    def values_from_indexes(self, indexes: IntList) -> "Line":
         return Line([self[i] for i in indexes])
 
     @validate
@@ -132,7 +139,7 @@ class Line(List[Literal[-1, 0, 1]]):
         return self.group_adjacent_fields({field})
 
     @indexes
-    def slice_by(self, field: FieldValue):
+    def slice_by(self, field: FieldValue) -> List["IndexList"]:
         return self.group_adjacent_fields(Field.fieldset() - {field})
 
     @indexes
@@ -141,23 +148,23 @@ class Line(List[Literal[-1, 0, 1]]):
         return self.slice_by(Field.EXCLUDE)
 
     @indexes
-    def slice_by_x_contains_o(self):
+    def slice_by_x_contains_o(self) -> "List[IndexList]":
         return self.slice_by_x().filter(lambda group: Field.COLOR in group.values())
 
     @indexes
-    def slice_by_x_contains_o_not_all_o(self):
+    def slice_by_x_contains_o_not_all_o(self) -> "List[IndexList]":
         return self.slice_by_x_contains_o().filter(lambda group: not group.values().match_all(lambda fv: fv == Field.COLOR))
 
     @indexes
-    def slice_by_x_all_empty(self):
+    def slice_by_x_all_empty(self) -> "List[IndexList]":
         return self.slice_by_x().filter(lambda group: Field.COLOR not in group.values())
 
     @indexes
-    def first_color_index_after_only_x(self):
+    def first_color_index_after_only_x(self) -> int | None:
         return self.get_index_if_value_is(self.slice_by_x()[0][0], Field.COLOR)
 
     @indexes
-    def last_o_index_before_only_x(self):
+    def last_o_index_before_only_x(self) -> int | None:
         return self.get_index_if_value_is(self.slice_by_x()[-1][-1], Field.COLOR)
 
     @indexes
@@ -172,7 +179,7 @@ class Line(List[Literal[-1, 0, 1]]):
                 finished_list.append(group)
         return finished_list
 
-    def range(self):
+    def index_range(self) -> range:
         return range(self.size())
 
     def copy(self) -> "Line":
@@ -208,6 +215,10 @@ class Line(List[Literal[-1, 0, 1]]):
             del tasks[0]
         return True
 
+    def set_slice(self, index_range: range, line: "Line"):
+        for i, slice_index in enumerate(index_range):
+            self.set_field(slice_index, line[i])
+
 class IndexList(IntList):
     def __init__(self, parent: Line, values:Sequence=()):
         super().__init__(values)
@@ -224,7 +235,7 @@ class IndexList(IntList):
     def range(self):
         return range(self[0], self[-1] + 1)
 
-    def yieldable(self, tasks: IntList, clause: Callable[[FieldValue], bool] = None):
+    def yieldable(self, tasks: IntList, clause: Callable[[FieldValue], bool] | None = None):
         """
         Creates a tuple whose structure is correct to be yielded to a @divider method
         :param clause: line clause
@@ -239,6 +250,15 @@ class ProcedureLib:
     @staticmethod
     def get_names() -> set[str]:
         return set(ProcedureLib.PROCEDURES.keys())
+
+    @staticmethod
+    def procedures():
+        return set(ProcedureLib.PROCEDURES.values())
+
+    @staticmethod
+    def dividers():
+        return set(ProcedureLib.DIVIDERS.values())
+
 
 class GameLine(tuple[Line, IntList]):
 
@@ -257,13 +277,17 @@ class GameLine(tuple[Line, IntList]):
         return ",".join(str(e) for e in self.task) + "|".join(["▁▁" if self.line[i] == 0 else "██" if self.line[i] == 1 else "░░" for i in range(self.line.size())])
 
     @staticmethod
-    def procedure(name):
+    def procedure(name: str):
         def decorator(procedure: "Callable[[GameLine], None]"):
             def wrapper(game_line) -> "tuple[GameLine, set[int]]":
+                if Field.EMPTY not in game_line.line:
+                    print(f"Proc::'{name}': Line already finished: {game_line}")
+                    return game_line, set()
                 before = Line(game_line.line)
                 procedure(game_line)
                 diffs = before.get_diff_indexes(game_line.line)
-                print(f"Procedure '{name}' executed. Diffs: {diffs}")
+                changed = len(diffs) != 0
+                print(f"Procedure '{name}' executed. {("No " if not changed else '') + "Diff"} {diffs if changed else ''}")
                 return game_line, diffs
 
             ProcedureLib.PROCEDURES[name] = wrapper
@@ -275,10 +299,19 @@ class GameLine(tuple[Line, IntList]):
     def divider(name: str):
         def decorator(divider: Divider):
             def wrapper(game_line) -> "list[tuple[range, GameLine]]":
-                divided = List(divider(game_line) or [])
+                more_than_expected = False
+                divided: List[tuple[range, GameLine]] = List(divider(game_line) or [])
                 divided = divided.filter(lambda div: len(div[0]) < game_line.line.size())
-                print(f"Divider '{name}' executed")
-                print(f'\tdivided = {list(divided)}')
+                unique_ranges = set(divided.map(lambda div: div[0]))    # keep unique ranges
+
+                if len(unique_ranges) != len(divided):
+                    more_than_expected = True
+                    print(f'\033[31mDivider {name} has produced multiple of the same ranges, FIX IT\033[0m')
+                    # TODO error below
+                    #divided = List([divided[divided.first_index_of(lambda div: div[0] == unique_range)] for unique_range in unique_ranges])
+                print(f"Divider '{name}' executed\n\tdivided = {divided}")
+                if more_than_expected:
+                    input("Just so you know")
                 return divided
             ProcedureLib.DIVIDERS[name] = wrapper
             return wrapper
@@ -290,51 +323,52 @@ class GameLine(tuple[Line, IntList]):
 
     @divider(name = "splits if a task is certainly finished")
     def split(self):
-        finished_groups = self.line.finished_tasks()
+        finished_groups = self.line.finished_tasks() # blocks that are sorrounded by X and don't contain empty fields
         tasks_copy = IntList(self.task)
         line_copy = Line(self.line)
         range_copy = range(self.line.size())
 
         finished_tasks = list[list[int]]()
-        for f_group in finished_groups:
+        for f_group in finished_groups:     # Separates the blocks to only individual colored blocks with its lengths (= tasks)
             adjacent_sizes = []
             for adj in Line(f_group.values()).group_adjacent_field(Field.COLOR):
                 adjacent_sizes.append(adj.size())
             finished_tasks.append(adjacent_sizes)
 
-        finished_blocks = list(zip(finished_groups, finished_tasks))
+        finished_blocks = list(zip(finished_groups, finished_tasks))    # [(blocks, tasks)...]
 
-        while finished_blocks:
+        while finished_blocks:      # while there are unchecked finished blocks
             first_group, first_tasks = finished_blocks[0]
-            if tasks_copy.starts_with(first_tasks) and tasks_copy.is_unique(first_tasks):
-                _, line_copy = line_copy.split_index(first_group[-1])     # remove before and group part
-                for i in range(len(first_tasks)):
+            if tasks_copy.starts_with(first_tasks) and tasks_copy.is_unique(first_tasks):   # if finsihed tasks are the first out of all tasks and unique
+                _, line_copy = line_copy.split_index(first_group[-1])                       # remove before and group part
+                for i in range(len(first_tasks)):                               # remove tasks
                     del tasks_copy[0]
-                range_copy = range(first_group[-1] + 1, self.line.size())
+                range_copy = range(first_group[-1] + 1, range_copy[-1] + 1)       # indicates the remaining index range of the whole line
                 del finished_blocks[0]
-                continue
+                continue            # and advance to the remaining finished groups
 
             last_group, last_tasks = finished_blocks[-1]
-            if tasks_copy.ends_with(last_tasks):
-                line_copy, _ = line_copy.split_index(last_group[0] - range_copy[0])     # remove before and group part
+            if tasks_copy.ends_with(last_tasks) and tasks_copy.is_unique(last_tasks):   # same as the previous just from the end
+                line_copy, _ = line_copy.split_index(last_group[0] - range_copy[0])     # remove after and group part
                 for i in range(len(last_tasks)):
                     del tasks_copy[-1]
                 range_copy = range(range_copy[0], last_group[0])
                 del finished_blocks[-1]
                 continue
 
-            for iter_index, (group, tasks) in enumerate(finished_blocks):
+            for iter_index, (group, tasks) in enumerate(finished_blocks):   # loop through finished block that are in the middle or not unique
 
-                if tasks_copy.is_unique(tasks):
+                if tasks_copy.is_unique(tasks):         # if tasks are unique, pass the before part to be solved, and delete that and the finished groups themselves.
                     tasks_indexes = tasks_copy.index(tasks)
                     sep_range = range(range_copy[0], group[0])
                     sep_line, line_copy = line_copy.split_index(*group.edges())
                     sep_task, tasks_copy = tasks_copy.split_index(*tasks_indexes.edges())
-                    range_copy = range(group[-1] + 1, self.line.size())
+                    range_copy = range(group[-1] + 1, range_copy[-1] + 1)
                     del finished_blocks[iter_index]
                     yield sep_range, GameLine(Line(sep_line), IntList(sep_task))
-                    break
+                    continue
 
+                # if not unique
                 possible_indexes: List[IntList] = tasks_copy.all_index(tasks)
                 passed_indexes: list[IntList] = []
                 before_line, after_line = line_copy.split_index(*(index - range_copy[0] for index in group.edges())) # subtract the offset
@@ -478,7 +512,7 @@ class GameLine(tuple[Line, IntList]):
                 from_start = not from_start    # switch directions
 
             else:
-                #   !! Read the from start block, basically the same but the other way around
+                #   !!! Read the "from start" block, basically the same but the other way around
                 end_checked = True
                 for start in range(available_tasks.size()-1, 1, -1):
                     tasks_rest, tasks_last = available_tasks.split_index(start, remove_index=False)
@@ -523,52 +557,49 @@ class GameLine(tuple[Line, IntList]):
 
         working_tasks = IntList(self.task)
 
-        for _sl_i, _slice in enumerate(x_slices):
+        for _sl_i, _slice in enumerate(x_slices):      # collect finished tasks indexes and sizes
             if Field.EMPTY not in _slice.values():
                 finished_indexes.append(_sl_i)
                 finished_tasks.append(_slice.size())
 
-        print(f'{list(zip(finished_indexes, finished_tasks))}')
-
-        yields = []
-
-        for f_ind, f_task in zip(finished_indexes, finished_tasks):
-            if self.task.is_unique(f_task):
-                del working_tasks[self.task.index(f_task)] #    TODO ISSUE HERE
+        for _, f_task in zip(finished_indexes, finished_tasks):
+            if working_tasks.is_unique(f_task):                 # if task is unique, remove the finished task and don't take the group into calculation
+                del working_tasks[working_tasks.index(f_task)]
                 continue
 
-            indexes = self.task.all_index(f_task)
-            if indexes.are_adjacent():
-                del working_tasks[indexes[0]]
+            indexes = self.task.all_index(f_task)      # if not unique, search possible indexes
+            if indexes.are_adjacent():                 # if all possible indexes are next to each other, it does not matter where we remove them
+                del working_tasks[indexes[0]]          # if not next to each other just ignore bc we do not know which task is fulfilled
 
-        not_done_slices = x_slices.filter(lambda _g: 0 in _g.values())
+        not_done_slices = x_slices.filter(lambda _g: 0 in _g.values())  # x-slices that are not finished
 
-        print(f'{working_tasks=}')
-        for i, task in enumerate(working_tasks):
+        yields = []     # don't yield right away bc merging is needed
+
+        for i, task in enumerate(working_tasks): # iterate through all tasks with their indexes, we are only inspecting singular tasks in this @divider
 
             passed_groups = List()
-            for g_i, group in enumerate(not_done_slices):
-                is_last = g_i == not_done_slices.size() - 1
-                print(f'{g_i=}')
-                print(f'{is_last=}')
-                before_task, after_task = working_tasks.split_index(i)
-                print(f'{before_task=}')
-                print(f'{after_task=}')
-                if g_i == 0:
-                    if sum(before_task, task + before_task.size()) <= group.size():
-                        passed_groups.append((g_i, before_task + [task]))
+            for g_i, group in enumerate(not_done_slices):               # iterate through all unsolved groups
+                is_last = g_i == not_done_slices.size() - 1             # if group is the last out of all unfinished groups
+
+                before_task, after_task = working_tasks.split_index(i)  # splits the unfinished tasks to the ones before and after the iterated task
+
+                if g_i == 0:    # if the group is the first out of all unfinished
+                    if sum(before_task, task + before_task.size()) <= group.size():     # if before tasks and itself fit in the group
+                        passed_groups.append((g_i, before_task + [task]))               # potential solution ?
                 elif is_last:
                     print(f'{sum(after_task, task + after_task.size()) <= group.size()=}')
-                    if sum(after_task, task + after_task.size()) <= group.size():
-                        passed_groups.append((g_i, [task] + after_task))
-                elif task <= group.size():
-                    passed_groups.append((g_i, [task]))
+                    if sum(after_task, task + after_task.size()) <= group.size():   # if after tasks and itself fit in the group
+                        passed_groups.append((g_i, [task] + after_task))            # potential solution ?
+                elif task <= group.size():      # if in middle of groups and task fits
+                    passed_groups.append((g_i, [task])) # potential solution ?
             print(f'{passed_groups.size()=}')
-            if passed_groups.size() == 1:
+            if passed_groups.size() == 1:       # if only one groups produced a potential solution
                 index, tasks = passed_groups[0]
                 group = not_done_slices[index]
+                # do not remove this group from the iteration because it is possible for multiple tasks to only fit in that group, this is why merging is needed
 
-                yields.append(group.yieldable(IntList([task]), clause = Line.disallowx)) # Don't yield right away, merging needed
+                # !!! Clause is neccessary bc not only these tasks can be in this group exclusively, so basically soft-solve
+                yields.append(group.yieldable(IntList([task]), clause = Line.disallowx)) # add the group and task to be  (merged then) yielded
 
         ranges = dict()
         for _range, line in yields:         # If two task is for the same range, merge the tasks
@@ -578,22 +609,23 @@ class GameLine(tuple[Line, IntList]):
                 merged = ranges[_range].task + line.task
                 ranges[_range] = GameLine(ranges[_range].line, merged)
 
-        for __range, __line in ranges.items():  # Clause is kept, not only these are present in the group necessarily, so excluding would be incorrect
+        for __range, __line in ranges.items(): # Clase is kept here, I checked
             yield __range, __line
 
     def get_too_small_groups(self):
         return self.line.slice_by_x_all_empty().filter(lambda group: self.task.match_all(lambda task: task > group.size()))
 
-    def is_solved(self):
-        return self.task == self.line.group_adjacent_field(Field.COLOR).map(lambda gr, i: gr.size())
-
-    @overload
-    def procIfDone(self) -> tuple["GameLine", set[int]]: ...
-    @procedure(name = "exclude if solved")
-    def procIfDone(self):
-        if self.is_solved():
-            for ind in self.line.indexes_of_field(Field.EMPTY):
+    def is_solved_diffs(self):
+        solved = self.task == self.line.group_adjacent_field(Field.COLOR).map(lambda gr, i: gr.size())
+        to_be_excluded = set()
+        if solved:
+            to_be_excluded = set(self.line.indexes_of_field(Field.EMPTY))
+            for ind in to_be_excluded:
                 self.line.exclude(ind)
+        return solved, to_be_excluded
+
+    def is_solved(self):
+        return self.is_solved_diffs()[0]
 
     @procedure(name = "first or last group is smaller than first or last task")
     def exclfirstsmall(self):
@@ -648,22 +680,22 @@ class GameLine(tuple[Line, IntList]):
     @procedure("if color on side -> its always the start")
     def procIfSide(self):
         i, j = 0, 0
-        firstCIndex = self.line.first_color_index_after_only_x()
-        if firstCIndex is not None:
-            for i in range(firstCIndex, firstCIndex + self.task[0]):
+        first_c_index: int | None = self.line.first_color_index_after_only_x()
+        if first_c_index is not None:
+            for i in range(first_c_index, first_c_index + self.task[0]):
                 self.line.fill(i)
             self.line.set_in_bound(i + 1, Field.EXCLUDE)
 
-        lastCIndex = self.line.last_o_index_before_only_x()
-        if lastCIndex is not None:
-            for j in range(lastCIndex - self.task[-1] + 1, lastCIndex):
+        last_c_index: int | None = self.line.last_o_index_before_only_x()
+        if last_c_index is not None:
+            for j in range(last_c_index - self.task[-1] + 1, last_c_index):
                 self.line.fill(j)
-            self.line.set_in_bound(lastCIndex - self.task[-1], Field.EXCLUDE)
+            self.line.set_in_bound(last_c_index - self.task[-1], Field.EXCLUDE)
 
     @procedure("if near start or end then continue the sequence")
     def continuestartorend(self):
         if Field.COLOR not in self.line:
-            return self
+            return
 
         first_task, last_task = self.task.edges()
         first_color, last_color = self.line.indexes_of_field(Field.COLOR).edges()
@@ -683,17 +715,14 @@ class GameLine(tuple[Line, IntList]):
     @procedure("if biggest task can be only in one group")
     def procIfOneIfBiggerThanAny(self):
         if self.task.size() == 1 or Field.COLOR not in self.line:
-            return self
+            return
         started = self.line.slice_by_x()
 
         biggestTask = max(self.task)
-        bigGs = started.filter(lambda g: g.size() >= biggestTask)
-        if bigGs.size() == 1:
-            biggestG = bigGs[0]
-
-            subLine = Line([self.line[i] for i in biggestG], clause = Line.disallowx)
-            subGameLine = GameLine(subLine, IntList([biggestTask]))
-            subGameLine.procedureOne()
+        big_gs = started.filter(lambda g: g.size() >= biggestTask)
+        if big_gs.size() == 1:
+            biggest_g = big_gs[0]
+            biggest_g.yieldable(IntList([biggestTask]))[1].procedureOne()
 
     @procedure("if first or last group contains color and is the size of the first task -> color")
     def procIfCertainG(self):
@@ -726,9 +755,9 @@ class GameLine(tuple[Line, IntList]):
 
     @procedure("if an adjacent colored list is same size as biggest task -> surround with x")
     def surroundIfBiggest(self):
-        colorGroups = self.line.group_adjacent_field(Field.COLOR)
+        color_groups = self.line.group_adjacent_field(Field.COLOR)
         biggest_task = max(self.task)
-        for group in colorGroups:
+        for group in color_groups:
             if group.size() == biggest_task:
                 for edge in (group[0] - 1, group[-1] + 1): #    Two surrounding fields
                     if self.line.size() > edge >= 0 == self.line[edge]:
@@ -737,7 +766,7 @@ class GameLine(tuple[Line, IntList]):
     @procedure("if one task and at least one colored field -> exclude unreachable")
     def excludeunreachable(self):
         if self.task.size() != 1 or Field.COLOR not in self.line:
-            return self
+            return
         task = self.task[0]
 
         colored_fields = self.line.indexes_of_field(Field.COLOR)
@@ -775,33 +804,92 @@ class GameLine(tuple[Line, IntList]):
                 for i in excluded:
                     self.line.exclude(i)
 
+    def solve(self) -> set[int]:
+        all_diffs = set[int]()
+        for start_proc in ProcedureLib.procedures():
+            starting_game_line, starting_proc_diffs = start_proc(self)
+            all_diffs.update(starting_proc_diffs)
+
+        def traverse_divide(index_range: range, line_part: GameLine, diffs: set[int]):
+            solved, exclusion_diffs = line_part.is_solved_diffs()
+            if solved:
+                self.line.set_slice(index_range, line_part.line)
+                diffs.update(exclusion_diffs)
+                return
+            for divider in ProcedureLib.dividers():
+                sub_parts = divider(line_part)
+                if len(sub_parts) == 0:
+                    for proc in ProcedureLib.procedures():
+                        game_slice, proc_diffs = proc(line_part)
+                        if Field.EMPTY not in game_slice.line:
+                            break
+                        if len(proc_diffs) != 0:
+                            self.line.set_slice(index_range, game_slice.line)
+                            diffs.update(offset_set(proc_diffs, index_range.start)) # offset diff
+                else:
+                    for sub_range, sub_part in sub_parts:
+                        sub_solved, sub_exclusion_diffs = sub_part.is_solved_diffs()
+                        if sub_solved and len(sub_exclusion_diffs) != 0:
+                            self.line.set_slice(index_range, sub_part.line)
+                            diffs.update(offset_set(sub_exclusion_diffs, index_range.start))
+                            continue
+                        start = sub_range.start + index_range.start # offset with prev sub part
+                        end = sub_range.stop + index_range.start
+                        traverse_divide(range(start, end), sub_part, diffs)
+
+        traverse_divide(self.line.index_range(), self, all_diffs)
+        _, end_check_diffs = self.is_solved_diffs()
+        all_diffs.update(end_check_diffs)
+        return all_diffs
+
 class Board(List[list[FieldValue]]):
 
-    def __init__(self, width=10, height=10, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__()
-        self.height = kwargs.get("height") or height
-        self.width = kwargs.get("width") or width
-        self.rowTask: List[IntList] = kwargs.get("rowTask")
-        self.colTask: List[IntList] = kwargs.get("colTask")
-        [self.append([Field.EMPTY for _ in range(width)]) for _ in range(height)]
+        self.rowTask: List[IntList] = List(kwargs.get("rowTask"))
+        self.colTask: List[IntList] = List(kwargs.get("colTask"))
+        self.height = len(self.colTask)
+        self.width = len(self.rowTask)
+        [self.append([Field.EMPTY for _ in range(self.width)]) for _ in range(self.height)]
+
+        self.latest_changes: set[type[int, int]] = set()
 
     def get(self, x: int, y: int):
         return self[x][y]
 
-    def __getitem__(self, index: int | tuple[Ellipsis, int]):
+    def __getitem__(self, index: int | tuple[EllipsisType, int]):
         if isinstance(index, int):
             return super().__getitem__(index)
-        elif isinstance(index, tuple):
+        if isinstance(index, tuple):
             return Line([super().__getitem__(c)[index[1]] for c in range(self.width)])
+        raise TypeError("wrong arguments")
 
     def __repr__(self) -> str:
-        return f'Board[][]::\n{[i for i in self]}'
+        return f'Board[{self.height}][{self.width}]'
 
     def print(self):
+        longest_row_task_length = max(self.colTask.map(lambda tasks: len(tasks)))
+
+        space_for_task = ceil(log10(max(self.rowTask.flat()))) + 1 # how many digits + 1
+        max_col_task_len = max(self.colTask.map(lambda tasks: len(tasks)))
+
+        horizontal_task_padding = space_for_task * (max_col_task_len + 2) # + 2 bc of index display
+        vertical_task_space = space_for_task * max_col_task_len
+        horizontal_padding_str = " " * horizontal_task_padding
+
         print("Board[][]::\n")
-        print("  "+"".join([f'{i:<3}' for i in range(self.width)]))
+        print(horizontal_padding_str + "".join([f'{i:<3}' for i in range(self.width)]))
+
+        for task_line_idx in range(longest_row_task_length):
+            line_task_strings = self.rowTask.map(lambda tasks: str(tasks[len(tasks) - longest_row_task_length + task_line_idx]) if longest_row_task_length - task_line_idx <= len(tasks) else "")
+            print(horizontal_padding_str + "".join([f'{task:<3}' for task in line_task_strings]))
         for i in range(self.height):
-            print(f'{i:>2}'+"|".join(["▁▁" if self[i][j] == 0 else "██" if self[i][j] == 1 else "░░" for j in range(self.width)]),
+
+            for col_task_idx in range(max_col_task_len):
+                pass
+
+            print(f'{i:<{space_for_task * 2}}{"".join([f'{task:>{space_for_task}}' for task in self.colTask[i]]):>{vertical_task_space}}'
+                  +"|".join([("\033[31m" if (j,i) in self.latest_changes else "") + ("▁▁" if self[i][j] == 0 else "██" if self[i][j] == 1 else "░░") + ("\033[0m" if (j,i) in self.latest_changes else "") for j in range(self.width)]),
                   sep="")
 
     def get_column(self, index: int) -> GameLine:
@@ -820,32 +908,18 @@ class Board(List[list[FieldValue]]):
     def get_field(self, column=0, row=0):
         return self[column][row]
 
-    @staticmethod
-    def procedures() -> set[Procedure]:
-        """Register the procedures here. For now, it runs in strict order"""
-        return set(ProcedureLib.PROCEDURES.values())
-
-    @staticmethod
-    def dividers() -> set[Divider]:
-        return set(ProcedureLib.DIVIDERS.values())
+    def solve_line(self, index: int, getter: Callable[[int], GameLine], setter: Callable[[int, Line], ...]) -> set[int]:
+        all_diffs = set[int]()
+        game_line = getter(index)
+        game_line.solve()
+        setter(index, game_line.line)
+        return all_diffs
 
     def solve_row(self, index: int) -> set[int]:
-        """Applies the procedures to a row at the index and replaces it with the previous one. Return the changed indexes"""
-        diffs = set[int]()
-        for proc in Board.procedures():
-            game_line, proc_diffs = proc(self.get_row(index))
-            self.set_row(index, game_line.line)
-            diffs = diffs.union(proc_diffs)
-        for divider in Board.dividers():
-            for index_range, line_slice in divider(self.get_row(index)):
-                for proc in Board.procedures():
-                    game_slice, proc_diffs = proc(line_slice)
-                    row = self.get_row(index)
-                    for i, slice_index in enumerate(index_range):
-                        row.line.set_field(slice_index, game_slice.line[i])
-                    self.set_row(index, row.line)
-                    diffs = diffs.union(proc_diffs)
-        return diffs
+        return self.solve_line(index, getter = self.get_row, setter = self.set_row)
+
+    def solve_column(self, index: int) -> set[int]:
+        return self.solve_line(index, getter = self.get_column, setter = self.set_column)
 
     def row_proc(self, index: int, proc: Procedure) -> set[int]:
         """Applies the given procedure to a row at a given index. Returns the changed indexes"""
@@ -859,25 +933,6 @@ class Board(List[list[FieldValue]]):
         self.set_column(index, game_line.line)
         return diff
 
-    def solve_column(self, index: int) -> set[int]:
-        """Applies the procedures to a column at the index and replaces it with the previous one. Return if the line
-        changed"""
-        diffs = set[int]()
-        for proc in self.procedures():
-            game_line, proc_diffs = proc(self.get_column(index))
-            self.set_column(index, game_line.line)
-            diffs = diffs.union(proc_diffs)
-        for divider in Board.dividers():
-            for index_range, line_slice in divider(self.get_column(index)):
-                for proc in Board.procedures():
-                    game_slice, proc_diffs = proc(line_slice)
-                    row = self.get_column(index)
-                    for i, slice_index in enumerate(index_range):
-                        row.line.set_field(slice_index, game_slice.line[i])
-                    self.set_column(index, row.line)
-                    diffs = diffs.union(proc_diffs)
-        return diffs
-
     def is_solved(self):
         for i in range(self.height):
             if not self.get_row(i).is_solved():
@@ -888,7 +943,7 @@ class Board(List[list[FieldValue]]):
         return self.match_all(lambda line: Line(line).match_all(lambda value: value == Field.EMPTY))
 
 def solve(board: Board):
-    #while not board.is_solved():
+    while not board.is_solved():
         for i in range(board.height):
             if board.is_solved():
                 break
@@ -897,24 +952,25 @@ def solve(board: Board):
             if board.is_solved():
                 break
             chain_solve(board, j, False)
+        input("\033[31mHasn't solved with chaining, enter to continue\033[0m")
 
 def chain_solve(board: Board, index: int, row: bool):
     KEY = f'{"row" if row else "col"}{index}'
     print(KEY)
     line_getter: Callable[[int], GameLine] = board.get_row if row else board.get_column
-    line_setter: Callable[[int, Line], None] = board.set_row if row else board.set_column
     line_solver: Callable[[int], set[int]] = board.solve_row if row else board.solve_column
     line = line_getter(index)
     print(f"line = {line}")
-    if line.is_solved():
-        game_line, diffs = line.procIfDone()
-        line_setter(index, game_line.line)
+    solved, diffs = line.is_solved_diffs()
+    if solved:
         print("SOLVED")
     else:
         diffs = line_solver(index)
     print(f'diffs = {diffs}')
+    board.latest_changes = {(diff if row else index, diff if not row else index) for diff in diffs}
+    print(f'{board.latest_changes=}')
     board.print()
-    # input()
+    if len(diffs) != 0: input()
     for i in diffs:
         print("chained")
         chain_solve(board, i, not row)
